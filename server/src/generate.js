@@ -265,7 +265,11 @@ export async function generateMcqs({ userId, body }) {
           ].join('\n'),
         },
       ],
-      maxTokens: 12000,
+      // 24000 leaves ~3x headroom for the model's internal reasoning
+      // (~6-12k tokens on chapter-sized prompts) before the question JSON.
+      // When reasoning exhausted a 12000 budget, the content came back
+      // EMPTY — this budget prevents that failure class entirely.
+      maxTokens: 24000,
       temperature: 0.5,
       meta: { userId, purpose: 'generate_mcqs' },
     });
@@ -499,7 +503,8 @@ export async function replaceQuestion({ userId, questionId }) {
           ].join('\n'),
         },
       ],
-      maxTokens: 6000,
+      // Same reasoning-headroom rule as the main generation call.
+      maxTokens: 20000,
       temperature: 0.5,
       meta: { userId, purpose: 'replace_question' },
     });

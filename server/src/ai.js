@@ -110,9 +110,12 @@ function extractJsonObject(text) {
 /**
  * Sends a chat request and returns the raw message content.
  * Robustness layers, in order:
- *   1. Thinking mode is DISABLED (see the body comment) — the model's
- *      internal reasoning was the root cause of both the latency and the
- *      intermittent empty responses.
+ *   1. Thinking mode is ON by default — it is what makes the model quote the
+ *      chapter word-for-word. The empty-response failure happened when the
+ *      model's reasoning exhausted the caller's max_tokens budget, so calls
+ *      with chapter-sized prompts pass a large budget (20000+). Callers that
+ *      only need fast structured JSON can pass thinking: 'disabled' (~10x
+ *      faster, verified, but paraphrases quotes — not for question writing).
  *   2. 3 attempts total. Attempts 1-2 use JSON mode; the final attempt drops
  *      response_format entirely (belt and braces).
  *   3. A stalled/timed-out attempt is retried on a fresh connection.
@@ -127,6 +130,7 @@ export async function chatJson({
   model: modelOverride,
   meta,
   timeoutMs = CALL_TIMEOUT_MS,
+  thinking: thinkingMode = 'auto',
 }) {
   const key = process.env.DEEPSEEK_API_KEY;
   if (!key) throw new MissingKeyError();
@@ -151,14 +155,11 @@ export async function chatJson({
         body: JSON.stringify({
           model,
           messages,
-          // deepseek-flash spends thousands of "thinking" tokens before it
-          // emits any content (20-30k chars of reasoning on a chapter-sized
-          // prompt). When that reasoning exhausts max_tokens, the content
-          // comes back EMPTY (finish_reason=length) — the exact failure our
-          // users hit. Every call here is structured JSON extraction, so we
-          // turn thinking off: ~10x faster, ~7x fewer tokens, and the empty
-          // responses stop entirely. Verified against the live API.
-          thinking: { type: 'disabled' },
+          // Thinking ON (default) makes the model copy chapter text verbatim
+          // in its supporting quotes. It costs 20-40s on chapter-sized
+          // prompts, so the reasoning must have headroom below max_tokens —
+          // when reasoning exhausts the budget the content comes back EMPTY.
+          ...(thinkingMode === 'disabled' ? { thinking: { type: 'disabled' } } : {}),
           ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
           temperature,
           max_tokens: maxTokens,

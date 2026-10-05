@@ -124,7 +124,9 @@ export async function generateStudyKit({ userId, chapterId, kind, count }) {
           ].join('\n'),
         },
       ],
-      maxTokens: 6000,
+      // Same reasoning-headroom rule as quiz generation: the model's
+      // internal thinking must fit alongside the JSON in max_tokens.
+      maxTokens: 20000,
       temperature: 0.4,
       meta: { userId, purpose: `study_kit_${cleanKind}` },
     });
