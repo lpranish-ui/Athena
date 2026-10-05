@@ -59,11 +59,64 @@ async function logAiCall(meta, model, usage) {
 }
 
 /**
+ * Pulls the first balanced {...} JSON object out of a string (best effort).
+ * Used to salvage answers DeepSeek puts in reasoning_content instead of the
+ * message content (a flash-model quirk that shows up as "empty" responses).
+ */
+function extractJsonObject(text) {
+  if (!text) return null;
+  let searchFrom = 0;
+  for (let tries = 0; tries < 40; tries++) {
+    const start = text.indexOf('{', searchFrom);
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === '\\') escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+
+    if (end !== -1) {
+      const candidate = text.slice(start, end + 1);
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed !== null && typeof parsed === 'object') return candidate;
+      } catch {
+        // Not valid JSON - keep scanning for the next brace.
+      }
+    }
+    searchFrom = start + 1;
+  }
+  return null;
+}
+
+/**
  * Sends a chat request and returns the raw message content.
- * Uses JSON mode; retries once — both for empty content (see DeepSeek's JSON
- * mode docs) and for network stalls (a timed-out attempt is retried on a
- * fresh connection). Non-retryable API errors (bad key, no balance…) throw
- * immediately.
+ * Robustness layers, in order:
+ *   1. 3 attempts total. Attempts 1-2 use JSON mode; the final attempt drops
+ *      response_format entirely (DeepSeek's JSON mode is the usual culprit
+ *      when a call completes but the content comes back empty).
+ *   2. A stalled/timed-out attempt is retried on a fresh connection.
+ *   3. If the content is empty but reasoning_content holds a parseable JSON
+ *      object, that object is salvaged instead of failing.
+ * Non-retryable API errors (bad key, no balance…) throw immediately.
  */
 export async function chatJson({
   messages,
@@ -79,8 +132,13 @@ export async function chatJson({
   const model = modelOverride?.trim() || getModel();
   let lastError = 'The AI returned an empty response.';
 
-  for (let attempt = 1; attempt <= 2; attempt++) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     const startedAt = Date.now();
+    // DeepSeek's JSON mode occasionally yields an empty message (its docs
+    // recommend retrying). The final attempt drops JSON mode entirely - the
+    // prompts already demand strict JSON and the parsers extract the first
+    // {...} block, so this path is still safe to parse.
+    const useJsonMode = attempt < 3;
     try {
       const response = await fetch(API_URL, {
         method: 'POST',
@@ -91,7 +149,7 @@ export async function chatJson({
         body: JSON.stringify({
           model,
           messages,
-          response_format: { type: 'json_object' },
+          ...(useJsonMode ? { response_format: { type: 'json_object' } } : {}),
           temperature,
           max_tokens: maxTokens,
         }),
@@ -106,14 +164,29 @@ export async function chatJson({
       }
 
       const completion = await response.json();
-      const content = completion?.choices?.[0]?.message?.content ?? '';
+      const choice = completion?.choices?.[0];
+      const content = choice?.message?.content ?? '';
       if (content.trim().length > 0) {
-        console.log(`ai call ok model=${model} attempt=${attempt} ms=${Date.now() - startedAt}`);
+        console.log(`ai call ok model=${model} attempt=${attempt} jsonMode=${useJsonMode} ms=${Date.now() - startedAt}`);
         await logAiCall(meta, model, completion?.usage);
         return content;
       }
+
+      // Empty content: DeepSeek sometimes tucks the answer into
+      // reasoning_content (or truncates before emitting any). Salvage a
+      // parseable JSON object from the reasoning as a best effort.
+      const reasoning = choice?.message?.reasoning_content ?? '';
+      const salvaged = extractJsonObject(reasoning);
+      if (salvaged) {
+        console.log(`ai call ok-salvaged model=${model} attempt=${attempt} jsonMode=${useJsonMode} ms=${Date.now() - startedAt}`);
+        await logAiCall(meta, model, completion?.usage);
+        return salvaged;
+      }
+
       lastError = 'The AI returned an empty response.';
-      console.error(`ai call empty model=${model} attempt=${attempt} ms=${Date.now() - startedAt}`);
+      console.error(
+        `ai call empty model=${model} attempt=${attempt} jsonMode=${useJsonMode} finish=${choice?.finish_reason ?? '-'} completion_tokens=${completion?.usage?.completion_tokens ?? '-'} reasoning_chars=${reasoning.length} ms=${Date.now() - startedAt}`,
+      );
     } catch (error) {
       lastError = error instanceof Error ? error.message : 'The AI request failed.';
       const status = typeof error === 'object' && error !== null ? error.status : undefined;
@@ -129,6 +202,8 @@ export async function chatJson({
     }
   }
 
-  if (lastError === 'The AI returned an empty response.') throw new Error(lastError);
+  if (lastError === 'The AI returned an empty response.') {
+    throw new Error('The AI service returned an empty response after several attempts. Please try again in a moment.');
+  }
   throw new Error(`The AI service did not respond in time (${lastError}). Please try again.`);
 }
