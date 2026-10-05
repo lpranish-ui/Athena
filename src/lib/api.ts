@@ -112,6 +112,62 @@ export async function ingestBook(input: {
   }
 }
 
+// ── reading progress ────────────────────────────────────────────────────────
+
+/** Where the student stopped reading in one book (null = not started). */
+export interface ReadingProgress {
+  chapter_id: string | null;
+  offset_ratio: number;
+  updated_at?: string;
+}
+
+/** One "continue reading" entry from GET /api/reading. */
+export interface ReadingListItem {
+  book_id: string;
+  chapter_id: string | null;
+  offset_ratio: number;
+  updated_at: string;
+  book_title: string;
+  book_subject: string;
+  book_author: string | null;
+  chapter_number: number | null;
+  chapter_title: string | null;
+}
+
+/** Loads the saved reading position for one book. */
+export async function getReadingProgress(bookId: string): Promise<ReadingProgress | null> {
+  try {
+    return await api.get<ReadingProgress | null>(`/api/books/${bookId}/reading-progress`);
+  } catch {
+    return null;
+  }
+}
+
+/** Saves the current reading position (best effort — never blocks reading). */
+export async function saveReadingProgress(
+  bookId: string,
+  chapterId: string | null,
+  offsetRatio: number,
+): Promise<void> {
+  try {
+    await api.put(`/api/books/${bookId}/reading-progress`, {
+      chapterId,
+      offsetRatio: Math.min(Math.max(offsetRatio, 0), 1),
+    });
+  } catch {
+    // Best effort — the reader keeps working even if offline.
+  }
+}
+
+/** The most recently read books (for the "Continue reading" shelf). */
+export async function getReadingList(): Promise<ReadingListItem[]> {
+  try {
+    return await api.get<ReadingListItem[]>('/api/reading');
+  } catch {
+    return [];
+  }
+}
+
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
   try {

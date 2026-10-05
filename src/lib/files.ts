@@ -7,7 +7,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-import { api } from './apiClient';
+import { api, apiRequest } from './apiClient';
 
 export type FileKind = 'pdf' | 'epub' | 'txt';
 
@@ -58,31 +58,134 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
   };
 }
 
-/** Reads the picked file into bytes for upload. */
-async function readFileBytes(picked: PickedBookFile): Promise<Uint8Array> {
+const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per request — any file size works
+
+export interface UploadProgress {
+  phase: 'uploading' | 'processing';
+  sentBytes: number;
+  totalBytes: number;
+  note?: string;
+}
+
+// On web, the picked file lives behind a blob: URL — keep the blob around so
+// slicing chunks does not re-fetch it every time.
+let webBlobCache: { uri: string; blob: Blob } | null = null;
+
+async function totalSizeOf(picked: PickedBookFile): Promise<number> {
+  if (picked.size && picked.size > 0) return picked.size;
   if (Platform.OS === 'web') {
     const response = await fetch(picked.uri);
-    return new Uint8Array(await response.arrayBuffer());
+    const blob = await response.blob();
+    webBlobCache = { uri: picked.uri, blob };
+    return blob.size;
   }
+  return new File(picked.uri).size ?? 0;
+}
+
+/** Reads one byte range of the picked file (web: Blob slice, native: file handle). */
+async function readChunk(picked: PickedBookFile, start: number, end: number): Promise<Uint8Array> {
+  const length = end - start;
+
+  if (Platform.OS === 'web') {
+    let blob = webBlobCache?.uri === picked.uri ? webBlobCache.blob : null;
+    if (!blob) {
+      const response = await fetch(picked.uri);
+      blob = await response.blob();
+      webBlobCache = { uri: picked.uri, blob };
+    }
+    return new Uint8Array(await blob.slice(start, end).arrayBuffer());
+  }
+
+  const file = new File(picked.uri);
   try {
-    return await new File(picked.uri).bytes();
+    const handle = file.open();
+    try {
+      handle.offset = start;
+      const bytes = handle.readBytes(length);
+      if (bytes && bytes.length > 0) return bytes;
+    } finally {
+      handle.close();
+    }
   } catch {
-    throw new Error('Could not read the selected file. Please try picking it again.');
+    // Random access is not available for this file provider — fall back to
+    // reading the whole file (fine for small books).
   }
+  const all = await file.bytes();
+  return all.slice(start, end);
 }
 
 /**
- * Sends a book file to the API, which extracts the text, splits the chapters
- * and marks the book ready. The raw file is not kept on the server.
+ * Uploads a book file of ANY size: creates the book, streams it to the API
+ * in 8 MB chunks (flat memory on phone and server), then hands it to the
+ * server-side extractor. `onProgress` fires after every chunk and once when
+ * processing starts.
  */
 export async function uploadBookFile(
-  bookId: string,
   picked: PickedBookFile,
-): Promise<{ bookId: string; chapters: number }> {
-  const bytes = await readFileBytes(picked);
-  return api.upload<{ bookId: string; chapters: number }>(
-    `/api/upload/${bookId}`,
-    bytes,
-    picked.fileType,
-  );
+  options: {
+    title?: string;
+    subject?: string;
+    author?: string;
+    onProgress?: (progress: UploadProgress) => void;
+  } = {},
+): Promise<{ bookId: string }> {
+  const totalBytes = await totalSizeOf(picked);
+  if (totalBytes <= 0) {
+    throw new Error('Could not read the selected file. Please try picking it again.');
+  }
+
+  const started = await api.post<{ bookId: string }>('/api/uploads', {
+    fileName: picked.name,
+    title: options.title,
+    subject: options.subject,
+    author: options.author,
+  });
+  const bookId = started.bookId;
+
+  try {
+    let sent = 0;
+    while (sent < totalBytes) {
+      const end = Math.min(sent + CHUNK_SIZE, totalBytes);
+      const chunk = await readChunk(picked, sent, end);
+      await apiRequest<{ received: number }>('PUT', `/api/uploads/${bookId}/chunk`, {
+        raw: chunk,
+        headers: { 'Content-Type': 'application/octet-stream' },
+        timeoutMs: 120000,
+      });
+      sent = end;
+      options.onProgress?.({ phase: 'uploading', sentBytes: sent, totalBytes });
+    }
+
+    await api.post(`/api/uploads/${bookId}/finish`, { size: sent });
+    options.onProgress?.({ phase: 'processing', sentBytes: sent, totalBytes });
+    return { bookId };
+  } catch (error) {
+    // Leave nothing behind on the server when a chunk fails.
+    await api.del(`/api/books/${bookId}`).catch(() => {});
+    throw error;
+  }
+}
+
+/** Waits while the server extracts the book; resolves when it is ready. */
+export async function waitForBookReady(
+  bookId: string,
+  options: { onNote?: (note: string) => void; timeoutMs?: number } = {},
+): Promise<void> {
+  const timeout = options.timeoutMs ?? 20 * 60 * 1000;
+  const startedAt = Date.now();
+
+  for (;;) {
+    const book = await api.get<{ status: string; status_message: string | null }>(
+      `/api/books/${bookId}`,
+    );
+    if (book.status === 'ready') return;
+    if (book.status === 'error') {
+      throw new Error(book.status_message || 'This book could not be processed.');
+    }
+    if (book.status_message) options.onNote?.(book.status_message);
+    if (Date.now() - startedAt > timeout) {
+      throw new Error('Processing is taking longer than expected. Check the library in a minute.');
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+  }
 }

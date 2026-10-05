@@ -118,12 +118,21 @@ export default function BookScreen() {
         {book.description ? <Text style={styles.description}>{book.description}</Text> : null}
 
         {chapters.length > 0 ? (
-          <Button
-            label="Build a quiz from chapters"
-            icon="sparkles-outline"
-            variant="secondary"
-            onPress={() => router.push({ pathname: '/generate', params: { bookId: book.id } })}
-          />
+          <View style={styles.actionGroup}>
+            <Button
+              label="Read book"
+              icon="book-outline"
+              onPress={() =>
+                router.push({ pathname: '/reader/[bookId]', params: { bookId: book.id } })
+              }
+            />
+            <Button
+              label="Build a quiz from chapters"
+              icon="sparkles-outline"
+              variant="secondary"
+              onPress={() => router.push({ pathname: '/generate', params: { bookId: book.id } })}
+            />
+          </View>
         ) : null}
 
         {error ? <ErrorBanner message={error} /> : null}
@@ -219,6 +228,9 @@ export default function BookScreen() {
 }
 
 const styles = StyleSheet.create({
+  actionGroup: {
+    gap: spacing.sm,
+  },
   content: {
     padding: 20,
     paddingBottom: 48,

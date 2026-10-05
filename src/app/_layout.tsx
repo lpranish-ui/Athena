@@ -88,6 +88,7 @@ function RootNavigator() {
       <Stack.Screen name="mock-exam" options={{ ...headerOptions, title: 'Mock exam' }} />
       <Stack.Screen name="group" options={{ ...headerOptions, title: 'Group study' }} />
       <Stack.Screen name="group/[code]" options={{ ...headerOptions, title: 'Group game' }} />
+      <Stack.Screen name="reader/[bookId]" options={{ headerShown: false }} />
     </Stack>
   );
 }

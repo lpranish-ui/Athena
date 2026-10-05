@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { Stack, useRouter } from 'expo-router';
 import { useState } from 'react';
 import {
-    Platform,
     Pressable,
     ScrollView,
     StyleSheet,
@@ -13,8 +12,7 @@ import {
 import { Screen } from '@/components/Screen';
 import { Button, Card, ErrorBanner, Input } from '@/components/ui';
 import { ingestBook } from '@/lib/api';
-import { api } from '@/lib/apiClient';
-import { pickBookFile, uploadBookFile, type PickedBookFile } from '@/lib/files';
+import { pickBookFile, uploadBookFile, waitForBookReady, type PickedBookFile } from '@/lib/files';
 import { suggestSubject } from '@/lib/subjects';
 import { colors, fontSize, radius, spacing, SUBJECT_SUGGESTIONS, withAlpha } from '@/theme';
 
@@ -31,6 +29,7 @@ export default function UploadScreen() {
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [rights, setRights] = useState(false);
 
@@ -72,44 +71,36 @@ export default function UploadScreen() {
       return;
     }
 
-    // Large medical textbooks often exceed the server limit — catch it here
-    // so nothing is half-created on the server.
-    const MAX_UPLOAD_MB = 80;
-    if (picked.size !== null && picked.size > MAX_UPLOAD_MB * 1024 * 1024) {
-      const sizeMb = (picked.size / (1024 * 1024)).toFixed(0);
-      setError(
-        `This file is ${sizeMb} MB — over the ${MAX_UPLOAD_MB} MB limit. Split the book into smaller PDFs (e.g. one per half) and upload those, or use “Paste text” for a chapter.`,
-      );
-      return;
-    }
+    // There is no size limit: the upload streams to the server in chunks.
 
     setBusy(true);
     setError(null);
-    let createdBookId: string | null = null;
+    setProgress(0);
     try {
-      setStage('Creating book…');
-      const book = await api.post<{ id: string }>('/api/books', {
+      // Uploads run in 8 MB chunks, so books of ANY size work.
+      const { bookId } = await uploadBookFile(picked, {
         title: title.trim(),
-        author: author.trim() || null,
         subject: subject.trim() || 'General',
-        file_type: picked.fileType,
+        author: author.trim() || undefined,
+        onProgress: (update) => {
+          if (update.phase === 'uploading') {
+            const ratio = update.totalBytes > 0 ? update.sentBytes / update.totalBytes : 0;
+            setProgress(ratio);
+            setStage(`Uploading… ${Math.round(ratio * 100)}%`);
+          } else {
+            setStage('Reading your book — big books can take a minute…');
+          }
+        },
       });
-      createdBookId = book.id;
 
-      setStage('Uploading and reading your book…');
-      const result = await uploadBookFile(book.id, picked);
-
-      router.replace({ pathname: '/book/[id]', params: { id: result.bookId } });
+      await waitForBookReady(bookId, { onNote: (note) => setStage(note) });
+      router.replace({ pathname: '/book/[id]', params: { id: bookId } });
     } catch (err) {
-      // Leave nothing behind on failure: remove the shell book row (the
-      // server already cleans up duplicates and unreadable files).
-      if (createdBookId) {
-        await api.del(`/api/books/${createdBookId}`).catch(() => {});
-      }
       setError(err instanceof Error ? err.message : 'Upload failed. Please try again.');
     } finally {
       setBusy(false);
       setStage(null);
+      setProgress(0);
     }
   };
 
@@ -289,16 +280,20 @@ export default function UploadScreen() {
           disabled={!rights}
         />
         {stage ? <Text style={styles.stage}>{stage}</Text> : null}
+        {busy && progress > 0 ? (
+          <View style={styles.progressTrack}>
+            <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
+          </View>
+        ) : null}
 
         <Card style={styles.tips} padded>
           <Text style={styles.tipsTitle}>Good to know</Text>
+          <Text style={styles.tip}>• Any file size works — uploads stream in the background.</Text>
           <Text style={styles.tip}>• PDFs must have selectable text — scans are not supported yet.</Text>
           <Text style={styles.tip}>• Chapters are detected from “Chapter N” style headings; otherwise the text is split into parts.</Text>
           <Text style={styles.tip}>• Your uploads stay private to your account.</Text>
           <Text style={styles.tip}>• Duplicate uploads of the same file are detected automatically.</Text>
-          {Platform.OS === 'web' ? (
-            <Text style={styles.tip}>• Big books (500+ pages) can take a minute to process.</Text>
-          ) : null}
+          <Text style={styles.tip}>• Big books (500+ pages) can take a minute to process.</Text>
         </Card>
       </ScrollView>
     </Screen>
@@ -391,6 +386,17 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: fontSize.sm,
     textAlign: 'center',
+  },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.surfaceAlt,
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 3,
+    backgroundColor: colors.primary,
   },
   rightsRow: {
     flexDirection: 'row',

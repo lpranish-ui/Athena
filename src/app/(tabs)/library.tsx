@@ -10,10 +10,12 @@ import {
     Text,
     View,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 import { BookCard } from '@/components/BookCard';
 import { Screen } from '@/components/Screen';
 import { Button, EmptyState, ErrorBanner, Input } from '@/components/ui';
+import { getReadingList, type ReadingListItem } from '@/lib/api';
 import { api } from '@/lib/apiClient';
 import { colors, spacing, withAlpha } from '@/theme';
 import type { BookWithCounts } from '@/types';
@@ -21,6 +23,7 @@ import type { BookWithCounts } from '@/types';
 export default function LibraryScreen() {
   const router = useRouter();
   const [books, setBooks] = useState<BookWithCounts[]>([]);
+  const [reading, setReading] = useState<ReadingListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,9 +32,13 @@ export default function LibraryScreen() {
 
   const load = useCallback(async () => {
     try {
-      const data = await api.get<BookWithCounts[]>('/api/books');
+      const [data, readingData] = await Promise.all([
+        api.get<BookWithCounts[]>('/api/books'),
+        getReadingList(),
+      ]);
       setError(null);
       setBooks(data);
+      setReading(readingData);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load the library.');
     }
@@ -88,6 +95,40 @@ export default function LibraryScreen() {
               </View>
               <Button label="Add book" icon="add" small onPress={() => router.push('/upload')} />
             </View>
+            {reading.length > 0 ? (
+              <View style={styles.shelf}>
+                <Text style={styles.shelfTitle}>Continue reading</Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.shelfRow}
+                >
+                  {reading.map((item) => (
+                    <Pressable
+                      key={item.book_id}
+                      style={styles.shelfCard}
+                      onPress={() =>
+                        router.push({
+                          pathname: '/reader/[bookId]',
+                          params: { bookId: item.book_id },
+                        })
+                      }
+                    >
+                      <View style={styles.shelfCover}>
+                        <Ionicons name="book" size={20} color={colors.primary} />
+                      </View>
+                      <Text style={styles.shelfBook} numberOfLines={1}>
+                        {item.book_title}
+                      </Text>
+                      <Text style={styles.shelfMeta} numberOfLines={1}>
+                        {item.chapter_number ? `Ch. ${item.chapter_number} · ` : ''}
+                        {Math.round(item.offset_ratio * 100)}%
+                      </Text>
+                    </Pressable>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
             <Input
               placeholder="Search by title or subject…"
               value={search}
@@ -200,6 +241,43 @@ const styles = StyleSheet.create({
   },
   error: {
     marginTop: spacing.xs,
+  },
+  shelf: {
+    gap: 8,
+  },
+  shelfTitle: {
+    color: colors.text,
+    fontSize: 15,
+    fontWeight: '800',
+  },
+  shelfRow: {
+    gap: 10,
+    paddingRight: spacing.md,
+  },
+  shelfCard: {
+    width: 150,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.surfaceAlt,
+    padding: 10,
+    gap: 6,
+  },
+  shelfCover: {
+    height: 44,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: withAlpha(colors.primary, '26'),
+  },
+  shelfBook: {
+    color: colors.text,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  shelfMeta: {
+    color: colors.textMuted,
+    fontSize: 11,
   },
   spinner: {
     marginTop: 48,
