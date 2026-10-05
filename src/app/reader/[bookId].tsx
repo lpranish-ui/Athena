@@ -337,7 +337,11 @@ export default function ReaderScreen() {
         text: actionTarget.text.slice(0, 2000),
         ...(kind === 'note' ? { note: noteDraft.trim() } : {}),
       });
-      setNotes((current) => [...current, saved]);
+      // The POST response carries no chapter join — fill it in for the drawer.
+      setNotes((current) => [
+        ...current,
+        { ...saved, chapter_number: chapter.number, chapter_title: chapter.title },
+      ]);
       setActionTarget(null);
       setNoteDraft('');
     } catch {
