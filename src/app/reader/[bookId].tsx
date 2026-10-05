@@ -123,22 +123,62 @@ export default function ReaderScreen() {
   const searchSeqRef = useRef(0);
 
   // Stop re-applying the saved position (user took over, or a new jump).
-  const cancelSettle = () => {
+  const cancelSettle = useCallback(() => {
     if (settleTimerRef.current !== null) {
       clearTimeout(settleTimerRef.current);
       settleTimerRef.current = null;
     }
-  };
+  }, []);
 
   // Drop any pending jump-to-paragraph target.
-  const cancelParagraphJump = () => {
+  const cancelParagraphJump = useCallback(() => {
     if (paragraphJumpTimerRef.current !== null) {
       clearTimeout(paragraphJumpTimerRef.current);
       paragraphJumpTimerRef.current = null;
     }
     pendingParagraphRef.current = null;
     pendingParagraphChapterRef.current = null;
-  };
+  }, []);
+
+  /** Offset of one paragraph inside the scroll content. Web measures the DOM
+   *  on demand (initial onLayout never fires there); native uses the layout
+   *  map, which RN fills reliably. Returns null when not measurable yet. */
+  const measureParagraph = useCallback((paragraphIndex: number): number | null => {
+    if (Platform.OS === 'web') {
+      type DomBox = { getBoundingClientRect: () => { top: number }; scrollTop: number };
+      const scroller = (scrollRef.current as unknown as { getScrollableNode?: () => DomBox | null } | null)?.getScrollableNode?.();
+      const doc = (globalThis as { document?: { querySelector: (selector: string) => DomBox | null } }).document;
+      const el = doc?.querySelector(`[data-pidx="${paragraphIndex}"]`);
+      if (!scroller || !el) return null;
+      return el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+    }
+    const y = paragraphLayoutsRef.current.get(paragraphIndex);
+    return y === undefined ? null : y;
+  }, []);
+
+  const tryJumpToParagraph = useCallback(() => {
+    const target = pendingParagraphRef.current;
+    if (target === null) return;
+    // The jump belongs to one chapter — ignore layouts of any other chapter.
+    const targetChapter = pendingParagraphChapterRef.current;
+    if (targetChapter !== null && targetChapter !== chapterIdRef.current) return;
+    const y = measureParagraph(target);
+    if (y === null) return;
+    // The precise paragraph position wins over any resume re-apply.
+    cancelSettle();
+    pendingScrollRef.current = null;
+    suppressScrollRef.current = true;
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: false });
+    // Keep re-applying while the layout settles, then let go — a real user
+    // scroll (or another jump) cancels it first.
+    if (paragraphJumpTimerRef.current === null) {
+      paragraphJumpTimerRef.current = setTimeout(() => {
+        paragraphJumpTimerRef.current = null;
+        pendingParagraphRef.current = null;
+        pendingParagraphChapterRef.current = null;
+      }, 900);
+    }
+  }, [cancelSettle, measureParagraph]);
 
   const theme = READER_THEMES[settings.theme];
 
@@ -229,6 +269,10 @@ export default function ReaderScreen() {
         });
         chapterIdRef.current = data.id;
         setLoading(false);
+        // Web paragraphs have no layout events until they resize — give the
+        // DOM a beat, then measure and jump to whatever is pending.
+        setTimeout(() => tryJumpToParagraph(), 60);
+        setTimeout(() => tryJumpToParagraph(), 320);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Could not load this chapter.');
@@ -241,7 +285,7 @@ export default function ReaderScreen() {
     return () => {
       cancelled = true;
     };
-  }, [chapters, index, chapter?.id]);
+  }, [chapters, index, chapter?.id, tryJumpToParagraph]);
 
   // ── persist settings ──────────────────────────────────────────────────────
 
@@ -317,6 +361,7 @@ export default function ReaderScreen() {
   const handleContentSize = (_width: number, height: number) => {
     contentHeightRef.current = height;
     applyPendingScroll();
+    tryJumpToParagraph();
   };
 
   const jumpToChapter = (nextIndex: number) => {
@@ -332,27 +377,6 @@ export default function ReaderScreen() {
   };
 
   // ── highlights & notes ────────────────────────────────────────────────────
-
-  const tryJumpToParagraph = () => {
-    const target = pendingParagraphRef.current;
-    if (target === null) return;
-    // The jump belongs to one chapter — ignore layouts of any other chapter.
-    const targetChapter = pendingParagraphChapterRef.current;
-    if (targetChapter !== null && targetChapter !== chapter?.id) return;
-    const y = paragraphLayoutsRef.current.get(target);
-    if (y === undefined) return;
-    suppressScrollRef.current = true;
-    scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: false });
-    // Keep re-applying while the layout settles, then let go — a real user
-    // scroll (or another jump) cancels it first.
-    if (paragraphJumpTimerRef.current === null) {
-      paragraphJumpTimerRef.current = setTimeout(() => {
-        paragraphJumpTimerRef.current = null;
-        pendingParagraphRef.current = null;
-        pendingParagraphChapterRef.current = null;
-      }, 900);
-    }
-  };
 
   const notesForParagraph = (paragraphIndex: number) =>
     notes.filter(
@@ -563,6 +587,9 @@ export default function ReaderScreen() {
               return (
                 <Pressable
                   key={paragraphIndex}
+                  {...(Platform.OS === 'web'
+                    ? { dataSet: { pidx: String(paragraphIndex) } }
+                    : {})}
                   onLongPress={() => {
                     setActionTarget({ paragraphIndex, text: paragraph });
                     setNoteMode('highlight');
