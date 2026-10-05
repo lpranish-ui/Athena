@@ -15,6 +15,10 @@
 // Duplicate uploads are detected with a SHA-256 fingerprint.
 // ============================================================================
 
+import { spawn } from 'node:child_process';
+import { createReadStream } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+
 import { strFromU8, unzipSync } from 'fflate';
 import crypto from 'node:crypto';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
@@ -34,7 +38,7 @@ if (typeof Promise.withResolvers !== 'function') {
   };
 }
 
-const MAX_TOTAL_CHARS = 1_200_000; // safety cap per book
+const MAX_TOTAL_CHARS = 6_000_000; // safety cap per book (fits full reference textbooks)
 const MIN_TEXT_LENGTH = 100;
 const MAX_CHAPTERS = 120;
 const FALLBACK_CHARS_PER_PART = 9000;
@@ -563,6 +567,158 @@ async function finalizeBook(bookId, lines, outline) {
 
   const inserted = await insertChapters(bookId, chapters);
   return inserted;
+}
+
+// ── poppler (pdftotext) extraction — low memory, any file size ───────────────
+//
+// The production container ships poppler-utils (see Dockerfile), so huge
+// PDFs never need to be loaded into memory the way pdf.js requires.
+// pdftotext writes the whole book as UTF-8 with a form feed (\f) between
+// pages, which maps perfectly onto the {line, page} shape the chapter
+// splitter already uses.
+
+let popplerChecked = false;
+let popplerAvailable = false;
+
+async function hasPoppler() {
+  if (popplerChecked) return popplerAvailable;
+  popplerChecked = true;
+  popplerAvailable = await new Promise((resolve) => {
+    try {
+      const child = spawn('pdftotext', ['-v'], { stdio: 'ignore' });
+      child.on('error', () => resolve(false));
+      child.on('close', (code) => resolve(code === 0));
+    } catch {
+      resolve(false);
+    }
+  });
+  return popplerAvailable;
+}
+
+function runPoppler(filePath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn('pdftotext', ['-enc', 'UTF-8', filePath, '-'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const chunks = [];
+    let captured = 0;
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      captured += chunk.length;
+      if (captured <= 64 * 1024 * 1024) chunks.push(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk).slice(0, 400);
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) resolve(Buffer.concat(chunks).toString('utf8'));
+      else reject(new IngestError(`Could not read this PDF (pdftotext exit ${code}). ${stderr}`.trim()));
+    });
+  });
+}
+
+async function extractPdfFile(filePath) {
+  if (await hasPoppler()) {
+    const text = await runPoppler(filePath);
+    const lines = [];
+    text.split('\f').forEach((pageText, index) => {
+      const page = index + 1;
+      for (const raw of pageText.split('\n')) {
+        const line = raw.trim();
+        if (line) lines.push({ text: line, page });
+      }
+    });
+    return { lines, outline: [] };
+  }
+
+  // Local-dev fallback: pdf.js (whole file in memory — fine for small books).
+  const bytes = await readFile(filePath);
+  return extractPdf(bytes);
+}
+
+function hashFile(filePath) {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = createReadStream(filePath);
+    stream.on('data', (chunk) => hash.update(chunk));
+    stream.on('error', reject);
+    stream.on('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function linesFromPlainText(text) {
+  return normalizeText(text)
+    .split('\n')
+    .map((line) => ({ text: line.trim(), page: null }))
+    .filter((line) => line.text.length > 0);
+}
+
+/**
+ * Ingests a book from a file already on disk (the streamed-upload flow).
+ * Memory stays flat for PDFs when poppler is available. The caller deletes
+ * the temp file afterwards.
+ */
+export async function ingestFileFromPath({ userId, bookId, filePath, fileType, onProgress }) {
+  const book = await one('select id, owner_id, file_type, title from books where id = $1', [bookId]);
+  if (!book) throw new IngestError('Book not found.');
+  if (book.owner_id !== userId) throw new IngestError('You can only process your own uploads.');
+
+  const kind = fileType || book.file_type;
+  if (!kind) throw new IngestError('This book has no file attached.');
+
+  try {
+    const fileHash = await hashFile(filePath);
+
+    // Duplicate detection: same owner + same file fingerprint.
+    const duplicate = await one(
+      'select id, title from books where owner_id = $1 and file_hash = $2 and id <> $3 limit 1',
+      [userId, fileHash, bookId],
+    );
+    if (duplicate) {
+      throw new IngestError(
+        `You have already uploaded this file as "${duplicate.title}". Delete that copy first if you want to re-upload it.`,
+      );
+    }
+
+    await onProgress?.('Extracting text…');
+
+    let lines;
+    let outline = [];
+    if (kind === 'pdf') {
+      const extracted = await extractPdfFile(filePath);
+      lines = extracted.lines;
+      outline = extracted.outline;
+
+      const textLength = lines.reduce((sum, line) => sum + line.text.length, 0);
+      if (textLength < 500) {
+        throw new IngestError(
+          'This PDF is a scan — it has no searchable text layer, so Athena cannot read it yet. ' +
+            'Scanned-book OCR is coming later; for now please upload a text-based PDF, EPUB or TXT.',
+        );
+      }
+    } else if (kind === 'epub') {
+      lines = linesFromPlainText(extractEpubText(await readFile(filePath)));
+    } else {
+      lines = linesFromPlainText(new TextDecoder('utf-8').decode(await readFile(filePath)));
+    }
+
+    await onProgress?.('Detecting chapters…');
+    const chapters = await finalizeBook(bookId, lines, outline);
+    await query(
+      "update books set status = 'ready', status_message = null, file_hash = $2 where id = $1",
+      [bookId, fileHash],
+    );
+    return { bookId, chapters };
+  } catch (error) {
+    const message =
+      error instanceof Error && error.message ? error.message : 'Could not process this book.';
+    await query(
+      "update books set status = 'error', status_message = $2 where id = $1",
+      [bookId, message.slice(0, 500)],
+    ).catch(() => {});
+    throw error instanceof IngestError ? error : new IngestError(message);
+  }
 }
 
 // ── public API ───────────────────────────────────────────────────────────────

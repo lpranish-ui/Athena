@@ -294,3 +294,17 @@ create table if not exists group_answers (
 );
 
 create index if not exists group_answers_room_idx on group_answers (room_id, question_index);
+
+-- ----------------------------------------------------------------------------
+-- reading_progress: where each student stopped reading in a book (per user)
+-- ----------------------------------------------------------------------------
+create table if not exists reading_progress (
+  user_id uuid not null references users (id) on delete cascade,
+  book_id uuid not null references books (id) on delete cascade,
+  chapter_id uuid references chapters (id) on delete set null,
+  offset_ratio real not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (user_id, book_id)
+);
+
+create index if not exists reading_progress_user_idx on reading_progress (user_id, updated_at desc);

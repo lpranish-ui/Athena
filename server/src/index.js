@@ -4,7 +4,9 @@
 // Postgres instance. See server/sql/schema.sql for the database.
 // ============================================================================
 
-import { readFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, stat, unlink } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import cors from 'cors';
 import express from 'express';
@@ -14,7 +16,7 @@ import { many, one, query, withTransaction } from './db.js';
 import { generateMcqs, replaceQuestion } from './generate.js';
 import { registerGroupRoutes } from './group.js';
 import { HttpError } from './http.js';
-import { IngestError, ingestFile, ingestText } from './ingest.js';
+import { IngestError, ingestFile, ingestFileFromPath, ingestText } from './ingest.js';
 import { generateStudyKit } from './studykit.js';
 
 const app = express();
@@ -22,6 +24,11 @@ const app = express();
 app.set('trust proxy', true);
 app.use(cors());
 app.use(express.json({ limit: '4mb' }));
+
+// Temp storage for the streamed uploads (ephemeral container disk — files are
+// deleted again as soon as the book is processed or the upload is abandoned).
+const UPLOAD_DIR = path.join(os.tmpdir(), 'athena-uploads');
+await mkdir(UPLOAD_DIR, { recursive: true }).catch(() => {});
 
 // Health check (used by Render).
 app.get('/api/health', async (_req, res) => {
@@ -196,6 +203,8 @@ app.delete('/api/books/:id', async (req, res) => {
     await ownedBook(req.params.id, req.user.id);
     // Chapters, quiz sets, attempts and study material cascade away with it.
     await query('delete from books where id = $1', [req.params.id]);
+    // An in-progress upload for this book is no longer needed.
+    await unlink(uploadPathFor(req.params.id)).catch(() => {});
     res.json({ ok: true });
   } catch (error) {
     handle(res, error, 'Could not delete the book.');
@@ -932,6 +941,198 @@ app.post(
   },
 );
 
+// ── streamed uploads — any file size ─────────────────────────────────────────
+// The client sends the file in ~8 MB chunks; every chunk is appended to a
+// temp file on disk, so server memory stays flat no matter how big the book
+// is. `finish` kicks off extraction (poppler for PDFs) in the background and
+// the client polls the book row until it is ready.
+
+function uploadPathFor(bookId) {
+  return path.join(UPLOAD_DIR, `${bookId}.upload`);
+}
+
+function fileKindFromName(name) {
+  const lower = String(name ?? '').toLowerCase();
+  if (lower.endsWith('.pdf')) return 'pdf';
+  if (lower.endsWith('.epub')) return 'epub';
+  if (lower.endsWith('.txt')) return 'txt';
+  return null;
+}
+
+app.post('/api/uploads', async (req, res) => {
+  try {
+    const fileName = String(req.body?.fileName ?? '').trim();
+    const fileType = fileKindFromName(fileName);
+    if (!fileType) throw new HttpError(400, 'Please choose a PDF, EPUB or TXT file.');
+
+    const fallbackTitle =
+      fileName.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ').trim() || 'Untitled book';
+    const title = String(req.body?.title ?? '').trim() || fallbackTitle;
+    const subject = String(req.body?.subject ?? '').trim() || 'General';
+    const author = String(req.body?.author ?? '').trim() || null;
+
+    const book = await one(
+      `insert into books (title, subject, author, owner_id, is_default, status, status_message, file_type)
+       values ($1, $2, $3, $4, false, 'processing', 'Uploading…', $5)
+       returning id`,
+      [title, subject, author, req.user.id, fileType],
+    );
+    if (!book) throw new HttpError(500, 'Could not start the upload.');
+
+    res.status(201).json({ bookId: book.id, fileType, chunkSize: 8 * 1024 * 1024 });
+  } catch (error) {
+    handle(res, error, 'Could not start the upload.');
+  }
+});
+
+app.put(
+  '/api/uploads/:bookId/chunk',
+  express.raw({ type: () => true, limit: '16mb' }),
+  async (req, res) => {
+    const bookId = req.params.bookId;
+    try {
+      const bytes = req.body instanceof Buffer ? req.body : Buffer.alloc(0);
+      if (bytes.length === 0) throw new HttpError(400, 'Empty chunk.');
+
+      const book = await one(
+        'select id, owner_id, status_message from books where id = $1',
+        [bookId],
+      );
+      if (!book || book.owner_id !== req.user.id) throw new HttpError(404, 'Upload not found.');
+      if (book.status_message !== 'Uploading…') {
+        throw new HttpError(409, 'This upload is no longer accepting data.');
+      }
+
+      await appendFile(uploadPathFor(bookId), bytes);
+      const info = await stat(uploadPathFor(bookId));
+      res.json({ received: info.size });
+    } catch (error) {
+      handle(res, error, 'Could not store that part of the file.');
+    }
+  },
+);
+
+app.post('/api/uploads/:bookId/finish', async (req, res) => {
+  const bookId = req.params.bookId;
+  const userId = req.user.id;
+  try {
+    // Claim the upload atomically so double-finishes cannot both process it.
+    const claimed = await one(
+      `update books set status_message = 'Processing…'
+        where id = $1 and owner_id = $2 and status_message = 'Uploading…'
+        returning file_type`,
+      [bookId, userId],
+    );
+    if (!claimed) throw new HttpError(409, 'This upload was already finished.');
+
+    const filePath = uploadPathFor(bookId);
+    const info = await stat(filePath).catch(() => null);
+    if (!info || info.size < 1000) {
+      await query(
+        "update books set status = 'error', status_message = 'The uploaded file was empty.' where id = $1",
+        [bookId],
+      );
+      throw new HttpError(400, 'The uploaded file was empty.');
+    }
+
+    res.status(202).json({ status: 'processing' });
+
+    // Process in the background — the client polls the book until it is ready.
+    void (async () => {
+      try {
+        await ingestFileFromPath({
+          userId,
+          bookId,
+          filePath,
+          fileType: claimed.file_type ?? undefined,
+          onProgress: async (note) => {
+            await query('update books set status_message = $2 where id = $1', [bookId, note]).catch(
+              () => {},
+            );
+          },
+        });
+      } catch (error) {
+        console.error(
+          `upload processing failed for ${bookId}:`,
+          error instanceof Error ? error.message : error,
+        );
+      } finally {
+        await unlink(filePath).catch(() => {});
+      }
+    })();
+  } catch (error) {
+    handle(res, error, 'Could not process the upload.');
+  }
+});
+
+// ── reading progress ─────────────────────────────────────────────────────────
+
+app.get('/api/reading', async (req, res) => {
+  try {
+    const rows = await many(
+      `select p.book_id, p.chapter_id, p.offset_ratio, p.updated_at,
+              b.title as book_title, b.subject as book_subject, b.author as book_author,
+              c.number as chapter_number, c.title as chapter_title
+         from reading_progress p
+         join books b on b.id = p.book_id
+         left join chapters c on c.id = p.chapter_id
+        where p.user_id = $1 and (b.is_default or b.owner_id = $1)
+        order by p.updated_at desc
+        limit 6`,
+      [req.user.id],
+    );
+    res.json(rows);
+  } catch (error) {
+    handle(res, error, 'Could not load your reading list.');
+  }
+});
+
+app.get('/api/books/:id/reading-progress', async (req, res) => {
+  try {
+    const book = await readableBook(req.params.id, req.user.id);
+    if (!book) throw new HttpError(404, 'Book not found.');
+    const row = await one(
+      'select chapter_id, offset_ratio, updated_at from reading_progress where user_id = $1 and book_id = $2',
+      [req.user.id, req.params.id],
+    );
+    res.json(row ?? null);
+  } catch (error) {
+    handle(res, error, 'Could not load your reading position.');
+  }
+});
+
+app.put('/api/books/:id/reading-progress', async (req, res) => {
+  try {
+    const book = await readableBook(req.params.id, req.user.id);
+    if (!book) throw new HttpError(404, 'Book not found.');
+
+    const chapterId = typeof req.body?.chapterId === 'string' ? req.body.chapterId : null;
+    const ratioRaw = Number(req.body?.offsetRatio);
+    const offsetRatio = Number.isFinite(ratioRaw) ? Math.min(Math.max(ratioRaw, 0), 1) : 0;
+
+    if (chapterId) {
+      const chapter = await one('select id from chapters where id = $1 and book_id = $2', [
+        chapterId,
+        req.params.id,
+      ]);
+      if (!chapter) throw new HttpError(400, 'That chapter does not belong to this book.');
+    }
+
+    await query(
+      `insert into reading_progress (user_id, book_id, chapter_id, offset_ratio, updated_at)
+       values ($1, $2, $3, $4, now())
+       on conflict (user_id, book_id)
+       do update set chapter_id = excluded.chapter_id,
+                     offset_ratio = excluded.offset_ratio,
+                     updated_at = now()`,
+      [req.user.id, req.params.id, chapterId, offsetRatio],
+    );
+    res.json({ ok: true });
+  } catch (error) {
+    handle(res, error, 'Could not save your reading position.');
+  }
+});
+
 // ── fallbacks ────────────────────────────────────────────────────────────────
 
 app.use('/api', (_req, res) => {
@@ -964,6 +1165,20 @@ try {
   console.log('Database schema is up to date.');
 } catch (error) {
   console.error('Schema bootstrap failed:', error instanceof Error ? error.message : error);
+}
+
+// Uploads interrupted by a deploy or a crash can never finish processing —
+// mark the stale ones as failed so they show an error instead of spinning
+// forever.
+try {
+  await query(
+    `update books
+        set status = 'error', status_message = 'The upload was interrupted. Please try again.'
+      where status = 'processing' and status_message in ('Uploading…', 'Processing…')
+        and created_at < now() - interval '1 hour'`,
+  );
+} catch (error) {
+  console.error('Upload cleanup failed:', error instanceof Error ? error.message : error);
 }
 
 const port = Number(process.env.PORT) || 8787;
