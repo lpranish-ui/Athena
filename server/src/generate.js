@@ -238,72 +238,85 @@ export async function generateMcqs({ userId, body }) {
     const book = { title: ordered[0].book_title, subject: ordered[0].book_subject };
     const multiChapter = contexts.length > 1;
 
-    const raw = await chatJson({
-      messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: [
-            fixedChaptersSection({
-              bookTitle: book?.title ?? 'Unknown book',
-              subject: book?.subject ?? 'Medicine',
-              chapters: contexts.map((context, index) => ({
-                title: context.title,
-                number: index + 1,
-                textWithMarkers: withPageMarkers(context.content, context.pageMap),
-              })),
-            }),
-            '',
-            requestSection({
-              type,
-              difficulty,
-              count,
-              targetExam,
-              existingStems,
-              multiChapter,
-            }),
-          ].join('\n'),
-        },
-      ],
-      // 24000 leaves ~3x headroom for the model's internal reasoning
-      // (~6-12k tokens on chapter-sized prompts) before the question JSON.
-      // When reasoning exhausted a 12000 budget, the content came back
-      // EMPTY — this budget prevents that failure class entirely.
-      maxTokens: 24000,
-      temperature: 0.5,
-      meta: { userId, purpose: 'generate_mcqs' },
-    });
+    const messages = [
+      { role: 'system', content: SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: [
+          fixedChaptersSection({
+            bookTitle: book?.title ?? 'Unknown book',
+            subject: book?.subject ?? 'Medicine',
+            chapters: contexts.map((context, index) => ({
+              title: context.title,
+              number: index + 1,
+              textWithMarkers: withPageMarkers(context.content, context.pageMap),
+            })),
+          }),
+          '',
+          requestSection({
+            type,
+            difficulty,
+            count,
+            targetExam,
+            existingStems,
+            multiChapter,
+          }),
+        ].join('\n'),
+      },
+    ];
 
-    // ---- validate -----------------------------------------------------------
-    const seen = new Set(existingStems.map((stem) => normalizeForMatch(stem).slice(0, 120)));
-    const existingTokens = existingStems.map((stem) => tokenSet(stem));
-    const acceptedTokens = [];
-    const questions = [];
+    // Parses one AI draft and keeps only questions that pass validation and
+    // aren't near-duplicates of what the user already has.
+    const draftQuestions = (raw) => {
+      const seen = new Set(existingStems.map((stem) => normalizeForMatch(stem).slice(0, 120)));
+      const existingTokens = existingStems.map((stem) => tokenSet(stem));
+      const acceptedTokens = [];
+      const drafted = [];
 
-    for (const candidate of parseQuestions(raw)) {
-      const question = validateQuestion(candidate, contexts, type);
-      if (!question) continue;
+      for (const candidate of parseQuestions(raw)) {
+        const question = validateQuestion(candidate, contexts, type);
+        if (!question) continue;
 
-      const key = normalizeForMatch(question.question).slice(0, 120);
-      if (seen.has(key)) continue;
+        const key = normalizeForMatch(question.question).slice(0, 120);
+        if (seen.has(key)) continue;
 
-      // Near-duplicate check against stored and freshly generated stems.
-      const tokens = tokenSet(question.question);
-      const nearDuplicate = [...existingTokens, ...acceptedTokens].some(
-        (other) => jaccard(tokens, other) >= NEAR_DUPLICATE_THRESHOLD,
+        // Near-duplicate check against stored and freshly generated stems.
+        const tokens = tokenSet(question.question);
+        const nearDuplicate = [...existingTokens, ...acceptedTokens].some(
+          (other) => jaccard(tokens, other) >= NEAR_DUPLICATE_THRESHOLD,
+        );
+        if (nearDuplicate) continue;
+
+        seen.add(key);
+        acceptedTokens.push(tokens);
+        drafted.push(question);
+        if (drafted.length >= count) break;
+      }
+      return drafted;
+    };
+
+    // ---- draft + validate ----------------------------------------------------
+    // 24000 max tokens leaves ~3x headroom for the model's internal reasoning
+    // (~6-12k tokens on chapter-sized prompts) before the question JSON — when
+    // reasoning exhausted a smaller budget, the content came back EMPTY.
+    let questions = draftQuestions(
+      await chatJson({ messages, maxTokens: 24000, temperature: 0.5, meta: { userId, purpose: 'generate_mcqs' } }),
+    );
+
+    // A sample occasionally paraphrases its supporting quotes, and the quote
+    // validator then rejects everything. One fresh sample almost always fixes
+    // it, so retry before giving up on the student.
+    if (questions.length === 0) {
+      console.log('generate_mcqs: first draft had no valid questions - retrying once');
+      questions = draftQuestions(
+        await chatJson({ messages, maxTokens: 24000, temperature: 0.6, meta: { userId, purpose: 'generate_mcqs_retry' } }),
       );
-      if (nearDuplicate) continue;
-
-      seen.add(key);
-      acceptedTokens.push(tokens);
-      questions.push(question);
-      if (questions.length >= count) break;
     }
 
     if (questions.length === 0) {
       throw new HttpError(
         502,
-        'The AI response did not pass our quality checks (every question needs a verifiable quote from the chapter). Please try again.',
+        'The AI could not build questions with verifiable quotes for this chapter right now. Please try again.',
       );
     }
 

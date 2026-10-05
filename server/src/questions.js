@@ -61,6 +61,19 @@ export function normalizeForMatch(text) {
   return String(text).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
+/**
+ * True when the normalized quote appears in the normalized text. A second,
+ * whitespace-free pass rescues PDF extraction artifacts like "30 yrs" vs
+ * "30yrs" or spaced hyphens — the quote is still verbatim book text, just
+ * rendered with different spacing.
+ */
+function textContainsQuote(normalizedText, needle) {
+  if (normalizedText.includes(needle)) return true;
+  const compactText = normalizedText.replace(/ /g, '');
+  const compactNeedle = needle.replace(/ /g, '');
+  return compactNeedle.length >= 8 && compactText.includes(compactNeedle);
+}
+
 /** Finds which printed page contains the quote, using the page map. */
 export function locateQuote(content, pageMap, quote) {
   const needle = normalizeForMatch(quote);
@@ -68,14 +81,14 @@ export function locateQuote(content, pageMap, quote) {
 
   const marks = validMarks(pageMap);
   if (marks.length === 0) {
-    return { found: normalizeForMatch(content).includes(needle), page: null };
+    return { found: textContainsQuote(normalizeForMatch(content), needle), page: null };
   }
 
   for (let i = 0; i < marks.length; i++) {
     const start = marks[i].char_start;
     const end = i + 1 < marks.length ? marks[i + 1].char_start : content.length;
     const slice = content.slice(Math.max(0, start), Math.max(0, end));
-    if (normalizeForMatch(slice).includes(needle)) {
+    if (textContainsQuote(normalizeForMatch(slice), needle)) {
       return { found: true, page: marks[i].page };
     }
   }
