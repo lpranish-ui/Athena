@@ -1,0 +1,14 @@
+# Supabase CLI configuration — https://supabase.com/docs/guides/cli
+#
+# Deploy the edge functions with:
+#   supabase functions deploy generate-mcqs
+#   supabase functions deploy ingest-book
+
+project_id = "athena"
+
+[functions.generate-mcqs]
+# Requires a signed-in user; the function checks the caller's JWT.
+verify_jwt = true
+
+[functions.ingest-book]
+verify_jwt = true

@@ -1,0 +1,22 @@
+{
+  "name": "athena-api",
+  "version": "1.5.0",
+  "private": true,
+  "description": "Athena backend API — auth, books, quizzes and AI generation on Render.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch --env-file=.env src/index.js",
+    "migrate": "node --env-file=.env scripts/migrate.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "fflate": "^0.8.2",
+    "pdfjs-dist": "^4.10.38",
+    "pg": "^8.13.1"
+  }
+}

@@ -1,0 +1,19 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Athena: Web dev server",
+			"type": "shell",
+			"command": "$env:BROWSER='none'; npx.cmd expo start --web",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "Athena: OCR worker",
+			"type": "shell",
+			"command": "Set-Location worker; python worker.py",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
