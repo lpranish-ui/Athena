@@ -17,10 +17,10 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { chatJson, MissingKeyError } from '../_shared/ai.ts';
 import { corsHeaders, errorMessage, jsonResponse } from '../_shared/cors.ts';
 import {
-  fixedChaptersSection,
-  validMarks,
-  withPageMarkers,
-  type ChapterContext,
+    fixedChaptersSection,
+    validMarks,
+    withPageMarkers,
+    type ChapterContext,
 } from '../_shared/questions.ts';
 
 const MIN_CARDS = 6;

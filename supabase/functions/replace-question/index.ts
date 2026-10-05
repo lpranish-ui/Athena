@@ -14,16 +14,16 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 import { chatJson, MissingKeyError } from '../_shared/ai.ts';
 import { corsHeaders, errorMessage, jsonResponse } from '../_shared/cors.ts';
 import {
-  QUESTION_TYPES,
-  SYSTEM_PROMPT,
-  fixedChaptersSection,
-  normalizeForMatch,
-  parseQuestions,
-  requestSection,
-  validateQuestion,
-  withPageMarkers,
-  type ChapterContext,
-  type QuestionType,
+    fixedChaptersSection,
+    normalizeForMatch,
+    parseQuestions,
+    QUESTION_TYPES,
+    requestSection,
+    SYSTEM_PROMPT,
+    validateQuestion,
+    withPageMarkers,
+    type ChapterContext,
+    type QuestionType,
 } from '../_shared/questions.ts';
 
 const ATTEMPTS_IN_ONE_CALL = 3; // ask for a few; keep the first that validates

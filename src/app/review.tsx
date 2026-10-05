@@ -8,16 +8,35 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
+import { api } from '@/lib/apiClient';
 import { scheduleReview } from '@/lib/review';
-import { supabase } from '@/lib/supabase';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
-import type { Mcq, Review } from '@/types';
+import type { QuestionType } from '@/types';
 
 const LETTERS = 'ABCDEFGH';
 const REVIEW_BATCH = 20;
 
-interface DueRow extends Review {
-  question: Mcq | null;
+/** One due review, flattened with the question it belongs to. */
+interface DueRow {
+  review_id: string;
+  due_at: string;
+  stability: number;
+  difficulty: number;
+  reps: number;
+  lapses: number;
+  id: string;
+  set_id: string;
+  chapter_id: string | null;
+  position: number;
+  question: string;
+  options: string[];
+  correct_index: number;
+  explanation: string | null;
+  option_explanations: string[] | null;
+  question_type: QuestionType;
+  source_page: number | null;
+  supporting_quote: string | null;
+  topic: string | null;
 }
 
 export default function ReviewScreen() {
@@ -31,17 +50,13 @@ export default function ReviewScreen() {
   const [stats, setStats] = useState({ correct: 0, total: 0 });
 
   const load = useCallback(async () => {
-    const { data, error: loadError } = await supabase
-      .from('reviews')
-      .select('*, question:mcqs(*)')
-      .lte('due_at', new Date().toISOString())
-      .order('due_at', { ascending: true })
-      .limit(REVIEW_BATCH);
-
-    if (loadError) {
-      setError(loadError.message);
+    try {
+      const data = await api.get<DueRow[]>('/api/reviews/due');
+      setError(null);
+      setQueue(data.slice(0, REVIEW_BATCH));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load your review queue.');
     }
-    setQueue(((data ?? []) as unknown as DueRow[]).filter((row) => row.question));
     setLoading(false);
   }, []);
 
@@ -55,9 +70,9 @@ export default function ReviewScreen() {
   const revealed = selected !== null;
 
   const choose = async (optionIndex: number) => {
-    if (revealed || !current?.question) return;
+    if (revealed || !current) return;
 
-    const correct = optionIndex === current.question.correct_index;
+    const correct = optionIndex === current.correct_index;
     setSelected(optionIndex);
     setStats((previous) => ({
       correct: previous.correct + (correct ? 1 : 0),
@@ -67,12 +82,9 @@ export default function ReviewScreen() {
     // Reschedule this question (best effort — never blocks the review).
     try {
       const schedule = scheduleReview(current, correct);
-      await supabase
-        .from('reviews')
-        .upsert(
-          { user_id: current.user_id, question_id: current.question_id, ...schedule },
-          { onConflict: 'user_id,question_id' },
-        );
+      await api.post('/api/reviews', {
+        rows: [{ question_id: current.id, ...schedule }],
+      });
     } catch {
       // Ignore — reviewing continues regardless.
     }
@@ -134,7 +146,7 @@ export default function ReviewScreen() {
   }
 
   // ── Question view ───────────────────────────────────────────────────────────
-  const question = current.question as Mcq;
+  const question = current;
   const progress = ((index + 1) / queue.length) * 100;
 
   return (

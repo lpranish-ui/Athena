@@ -13,7 +13,7 @@ import { Alert, Platform, ScrollView, StyleSheet, Text, View } from 'react-nativ
 
 import { Screen } from '@/components/Screen';
 import { Button, Card, ErrorBanner, Input, LoadingView } from '@/components/ui';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, fontSize, spacing, withAlpha } from '@/theme';
 import type { Chapter, ChapterSummary, PageMark } from '@/types';
 
@@ -40,17 +40,17 @@ export default function ManageChaptersScreen() {
 
   const reload = useCallback(async () => {
     if (!bookId) return;
-    const [bookResult, chaptersResult] = await Promise.all([
-      supabase.from('books').select('title').eq('id', bookId).maybeSingle(),
-      supabase
-        .from('chapters')
-        .select('id, book_id, number, title, first_page, last_page')
-        .eq('book_id', bookId)
-        .order('number', { ascending: true })
-        .order('created_at', { ascending: true }),
-    ]);
-    if (bookResult.data) setBookTitle((bookResult.data as { title: string }).title);
-    setChapters((chaptersResult.data ?? []) as ChapterSummary[]);
+    try {
+      const [book, list] = await Promise.all([
+        api.get<{ title: string }>(`/api/books/${bookId}`),
+        api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`),
+      ]);
+      setBookTitle(book.title);
+      setChapters(list);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the chapters.');
+    }
     setLoading(false);
   }, [bookId]);
 
@@ -87,22 +87,8 @@ export default function ManageChaptersScreen() {
   /** Renumbers all chapters of the book to 1..n in current display order. */
   const renumber = async () => {
     if (!bookId) return;
-    const { data } = await supabase
-      .from('chapters')
-      .select('id')
-      .eq('book_id', bookId)
-      .order('number', { ascending: true })
-      .order('created_at', { ascending: true });
-    if (!data) return;
-
-    const rows = data.map((row, index) => ({ id: (row as { id: string }).id, number: index + 1 }));
-    for (let i = 0; i < rows.length; i += 10) {
-      await Promise.all(
-        rows
-          .slice(i, i + 10)
-          .map((row) => supabase.from('chapters').update({ number: row.number }).eq('id', row.id)),
-      );
-    }
+    const rows = await api.get<{ id: string }[]>(`/api/books/${bookId}/chapters`);
+    await api.post('/api/chapters/renumber', { book_id: bookId, ids: rows.map((row) => row.id) });
   };
 
   // ── rename ──────────────────────────────────────────────────────────────────
@@ -111,11 +97,7 @@ export default function ManageChaptersScreen() {
     const title = renameText.trim();
     if (!title) return;
     await run(async () => {
-      const { error: renameError } = await supabase
-        .from('chapters')
-        .update({ title })
-        .eq('id', chapterId);
-      if (renameError) throw new Error(renameError.message);
+      await api.put(`/api/chapters/${chapterId}`, { title });
       setRenamingId(null);
       await reload();
     });
@@ -133,54 +115,8 @@ export default function ManageChaptersScreen() {
       'The two chapters become one. Quizzes you generated from either chapter stay available.',
       () =>
         void run(async () => {
-          const [prevResult, currResult] = await Promise.all([
-            supabase.from('chapters').select('*').eq('id', previous.id).single(),
-            supabase.from('chapters').select('*').eq('id', current.id).single(),
-          ]);
-          if (prevResult.error || currResult.error || !prevResult.data || !currResult.data) {
-            throw new Error('Could not load the chapters to merge.');
-          }
-
-          const prev = prevResult.data as Chapter;
-          const curr = currResult.data as Chapter;
-          const shift = prev.content.length + 2;
-          const mergedContent = `${prev.content}\n\n${curr.content}`;
-          const prevMarks = validMarks(prev.page_map);
-          const currMarks = validMarks(curr.page_map);
-          const mergedMap =
-            prevMarks.length > 0 && currMarks.length > 0
-              ? [
-                  ...prevMarks,
-                  ...currMarks.map((mark) => ({ page: mark.page, char_start: mark.char_start + shift })),
-                ]
-              : null;
-
-          const { error: updateError } = await supabase
-            .from('chapters')
-            .update({
-              content: mergedContent,
-              page_map: mergedMap,
-              first_page: prev.first_page ?? curr.first_page,
-              last_page: curr.last_page ?? prev.last_page,
-            })
-            .eq('id', prev.id);
-          if (updateError) throw new Error(updateError.message);
-
-          // Keep quizzes: re-point them before removing the merged row (deleting
-          // the row would otherwise cascade-delete its quiz sets).
-          const { error: repointError } = await supabase
-            .from('mcq_sets')
-            .update({ chapter_id: prev.id })
-            .eq('chapter_id', curr.id);
-          if (repointError) throw new Error(repointError.message);
-
-          const { error: deleteError } = await supabase
-            .from('chapters')
-            .delete()
-            .eq('id', curr.id);
-          if (deleteError) throw new Error(deleteError.message);
-
-          await renumber();
+          // The server merges the text + page maps, re-points quizzes and renumbers.
+          await api.post(`/api/chapters/${current.id}/merge`, { intoId: previous.id });
           await reload();
         }),
     );
@@ -190,14 +126,7 @@ export default function ManageChaptersScreen() {
 
   const splitChapter = async (chapter: ChapterSummary, pageInput: string) => {
     await run(async () => {
-      const { data: full, error: fetchError } = await supabase
-        .from('chapters')
-        .select('*')
-        .eq('id', chapter.id)
-        .single();
-      if (fetchError || !full) throw new Error(fetchError?.message ?? 'Could not load the chapter.');
-
-      const row = full as Chapter;
+      const row = await api.get<Chapter>(`/api/chapters/${chapter.id}`);
       const marks = validMarks(row.page_map);
 
       let cut = -1;
@@ -244,26 +173,21 @@ export default function ManageChaptersScreen() {
       const resolvedTailFirstPage =
         tailFirstPage ?? (tailMarks.length > 0 ? tailMarks[0].page : null);
 
-      const { error: updateError } = await supabase
-        .from('chapters')
-        .update({
-          content: head,
-          last_page: headLastPage,
-          page_map: headMarks.length > 0 ? headMarks : null,
-        })
-        .eq('id', row.id);
-      if (updateError) throw new Error(updateError.message);
+      await api.put(`/api/chapters/${row.id}`, {
+        content: head,
+        last_page: headLastPage,
+        page_map: headMarks.length > 0 ? headMarks : null,
+      });
 
-      const { error: insertError } = await supabase.from('chapters').insert({
+      await api.post('/api/chapters', {
         book_id: row.book_id,
-        number: row.number + 1, // renumber resolves ordering by created_at
+        number: row.number + 1,
         title: `${row.title} — part 2`,
         content: tail,
         first_page: resolvedTailFirstPage,
         last_page: row.last_page,
         page_map: tailMarks.length > 0 ? tailMarks : null,
       });
-      if (insertError) throw new Error(insertError.message);
 
       await renumber();
       setSplittingId(null);
@@ -279,12 +203,8 @@ export default function ManageChaptersScreen() {
       'Its text is removed, and quizzes generated from this chapter are deleted too.',
       () =>
         void run(async () => {
-          const { error: deleteError } = await supabase
-            .from('chapters')
-            .delete()
-            .eq('id', chapter.id);
-          if (deleteError) throw new Error(deleteError.message);
-          await renumber();
+          // The server deletes the chapter and renumbers the rest.
+          await api.del(`/api/chapters/${chapter.id}`);
           await reload();
         }),
     );

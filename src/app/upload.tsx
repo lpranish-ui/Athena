@@ -13,17 +13,15 @@ import {
 import { Screen } from '@/components/Screen';
 import { Button, Card, ErrorBanner, Input } from '@/components/ui';
 import { ingestBook } from '@/lib/api';
-import { useAuth } from '@/lib/auth';
+import { api } from '@/lib/apiClient';
 import { pickBookFile, uploadBookFile, type PickedBookFile } from '@/lib/files';
 import { suggestSubject } from '@/lib/subjects';
-import { supabase } from '@/lib/supabase';
 import { colors, fontSize, radius, spacing, SUBJECT_SUGGESTIONS, withAlpha } from '@/theme';
 
 type Mode = 'file' | 'text';
 
 export default function UploadScreen() {
   const router = useRouter();
-  const { user } = useAuth();
 
   const [mode, setMode] = useState<Mode>('file');
   const [picked, setPicked] = useState<PickedBookFile | null>(null);
@@ -61,7 +59,6 @@ export default function UploadScreen() {
   };
 
   const startFileUpload = async () => {
-    if (!user) return;
     if (!rights) {
       setError('Please confirm you have the right to use this book first.');
       return;
@@ -77,47 +74,22 @@ export default function UploadScreen() {
 
     setBusy(true);
     setError(null);
-    let createdBookId: string | null = null;
     try {
       setStage('Creating book…');
-      const { data: book, error: createError } = await supabase
-        .from('books')
-        .insert({
-          title: title.trim(),
-          author: author.trim() || null,
-          subject: subject.trim() || 'General',
-          owner_id: user.id,
-          is_default: false,
-          status: 'processing',
-          file_type: picked.fileType,
-        })
-        .select('id')
-        .single();
+      const book = await api.post<{ id: string }>('/api/books', {
+        title: title.trim(),
+        author: author.trim() || null,
+        subject: subject.trim() || 'General',
+        file_type: picked.fileType,
+      });
 
-      if (createError || !book) {
-        throw new Error(createError?.message ?? 'Could not create the book.');
-      }
-      createdBookId = book.id as string;
-
-      setStage('Uploading file…');
-      const path = await uploadBookFile(user.id, book.id, picked);
-      const { error: pathError } = await supabase
-        .from('books')
-        .update({ file_path: path })
-        .eq('id', book.id);
-      if (pathError) throw new Error(pathError.message);
-
-      setStage('Extracting text and splitting chapters…');
-      const result = await ingestBook({ mode: 'file', bookId: book.id });
+      setStage('Uploading and reading your book…');
+      const result = await uploadBookFile(book.id, picked);
 
       router.replace({ pathname: '/book/[id]', params: { id: result.bookId } });
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Upload failed. Please try again.';
-      if (createdBookId && /already uploaded/i.test(message)) {
-        // The file is a duplicate — remove the shell book row we just created.
-        await supabase.from('books').delete().eq('id', createdBookId);
-      }
-      setError(message);
+      // Duplicate / unreadable uploads are cleaned up by the server.
+      setError(err instanceof Error ? err.message : 'Upload failed. Please try again.');
     } finally {
       setBusy(false);
       setStage(null);
@@ -143,7 +115,6 @@ export default function UploadScreen() {
     try {
       setStage('Building book and chapters…');
       const result = await ingestBook({
-        mode: 'text',
         title: title.trim(),
         subject: subject.trim() || 'General',
         author: author.trim() || undefined,

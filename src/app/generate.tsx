@@ -8,7 +8,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Screen } from '@/components/Screen';
 import { Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
 import { generateQuiz } from '@/lib/api';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import type { ChapterSummary, Difficulty, QuestionType } from '@/types';
 
@@ -86,27 +86,20 @@ export default function GenerateScreen() {
   const load = useCallback(async () => {
     if (!bookId) return;
 
-    const [bookResult, chaptersResult] = await Promise.all([
-      supabase.from('books').select('title, subject').eq('id', bookId).maybeSingle(),
-      supabase
-        .from('chapters')
-        .select('id, book_id, number, title, first_page, last_page')
-        .eq('book_id', bookId)
-        .order('number', { ascending: true }),
-    ]);
-
-    if (bookResult.data) {
-      const book = bookResult.data as { title: string; subject: string };
+    try {
+      const book = await api.get<{ title: string; subject: string }>(`/api/books/${bookId}`);
       setBookTitle(book.title);
       setSubject(book.subject);
-    }
 
-    const list = (chaptersResult.data ?? []) as ChapterSummary[];
-    setChapters(list);
-    setSelected((previous) => {
-      if (previous.size > 0) return previous;
-      return list.length > 0 ? new Set([list[0].id]) : new Set();
-    });
+      const list = await api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`);
+      setChapters(list);
+      setSelected((previous) => {
+        if (previous.size > 0) return previous;
+        return list.length > 0 ? new Set([list[0].id]) : new Set();
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the chapters.');
+    }
     setLoading(false);
   }, [bookId]);
 

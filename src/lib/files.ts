@@ -1,10 +1,13 @@
 // File picking + upload helpers that work on web, Android and iOS.
+//
+// The picked file is sent straight to the API, which extracts the text and
+// chapters. Nothing is stored server-side afterwards.
 
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-import { supabase } from './supabase';
+import { api } from './apiClient';
 
 export type FileKind = 'pdf' | 'epub' | 'txt';
 
@@ -55,37 +58,31 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
   };
 }
 
-/** Reads the picked file into something supabase-js can upload. */
-async function readFileBody(picked: PickedBookFile): Promise<Blob | Uint8Array> {
+/** Reads the picked file into bytes for upload. */
+async function readFileBytes(picked: PickedBookFile): Promise<Uint8Array> {
   if (Platform.OS === 'web') {
     const response = await fetch(picked.uri);
-    return await response.blob();
+    return new Uint8Array(await response.arrayBuffer());
   }
   try {
-    return new File(picked.uri).bytes();
+    return await new File(picked.uri).bytes();
   } catch {
     throw new Error('Could not read the selected file. Please try picking it again.');
   }
 }
 
 /**
- * Uploads a book file to the private `books` storage bucket.
- * Files live under `{userId}/{bookId}.{ext}` and are only readable by their owner.
+ * Sends a book file to the API, which extracts the text, splits the chapters
+ * and marks the book ready. The raw file is not kept on the server.
  */
 export async function uploadBookFile(
-  userId: string,
   bookId: string,
   picked: PickedBookFile,
-): Promise<string> {
-  const path = `${userId}/${bookId}.${picked.fileType}`;
-  const body = await readFileBody(picked);
-
-  const { error } = await supabase.storage
-    .from('books')
-    .upload(path, body, { contentType: MIME_TYPES[picked.fileType], upsert: true });
-
-  if (error) {
-    throw new Error(`Upload failed: ${error.message}`);
-  }
-  return path;
+): Promise<{ bookId: string; chapters: number }> {
+  const bytes = await readFileBytes(picked);
+  return api.upload<{ bookId: string; chapters: number }>(
+    `/api/upload/${bookId}`,
+    bytes,
+    picked.fileType,
+  );
 }

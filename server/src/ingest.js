@@ -15,8 +15,8 @@
 // Duplicate uploads are detected with a SHA-256 fingerprint.
 // ============================================================================
 
-import crypto from 'node:crypto';
 import { strFromU8, unzipSync } from 'fflate';
+import crypto from 'node:crypto';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { one, query } from './db.js';

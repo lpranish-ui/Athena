@@ -1,26 +1,13 @@
-// Thin wrappers around the Athena edge functions + small data helpers.
+// REST wrappers for the Athena API + small data helpers.
+// (Replaces the old Supabase edge-function invoke helpers.)
 
 import type { Difficulty, FlagReason, QuestionType, StudyContent } from '@/types';
-import { supabase } from './supabase';
+import { api, ApiError } from './apiClient';
 
-/** Pulls a friendly message out of a supabase.functions.invoke error. */
-async function toUserMessage(error: unknown, fallback: string): Promise<string> {
-  const candidate = error as {
-    name?: string;
-    message?: string;
-    context?: { json?: () => Promise<unknown> };
-  };
-
-  if (candidate?.name === 'FunctionsHttpError' && candidate.context?.json) {
-    try {
-      const body = (await candidate.context.json()) as { error?: string };
-      if (body?.error) return body.error;
-    } catch {
-      // fall through to the generic message
-    }
-  }
-
-  if (candidate?.message) return candidate.message;
+/** Pulls a friendly message out of an API error. */
+function toUserMessage(error: unknown, fallback: string): string {
+  if (error instanceof ApiError) return error.message;
+  if (error instanceof Error && error.message) return error.message;
   return fallback;
 }
 
@@ -39,23 +26,19 @@ interface GenerateResult {
 async function generateChunk(
   input: GenerateInput & { addToSetId?: string },
 ): Promise<GenerateResult> {
-  const { data, error } = await supabase.functions.invoke('generate-mcqs', { body: input });
-
-  if (error) {
-    throw new Error(await toUserMessage(error, 'Quiz generation failed. Please try again.'));
+  try {
+    return await api.post<GenerateResult>('/api/ai/generate-mcqs', input);
+  } catch (error) {
+    throw new Error(toUserMessage(error, 'Quiz generation failed. Please try again.'));
   }
-  if (data?.error) {
-    throw new Error(data.error as string);
-  }
-  return data as GenerateResult;
 }
 
 const GENERATION_CHUNK = 20;
 
 /**
  * Generates a quiz of any supported size (10 / 20 / 50). Large sets are built
- * in chunks of 20 questions — each chunk is one AI call, comfortably inside
- * the server's time limits — and appended to the same quiz.
+ * in chunks of 20 questions — each chunk is one AI call — and appended to the
+ * same quiz.
  */
 export async function generateQuiz(
   input: GenerateInput & { onProgress?: (done: number, total: number) => void },
@@ -88,17 +71,11 @@ export async function generateQuiz(
 
 /** Creates a fresh question to replace one the student flagged. */
 export async function replaceQuestion(questionId: string): Promise<{ mcqId: string }> {
-  const { data, error } = await supabase.functions.invoke('replace-question', {
-    body: { questionId },
-  });
-
-  if (error) {
-    throw new Error(await toUserMessage(error, 'Could not create a replacement question.'));
+  try {
+    return await api.post<{ mcqId: string }>('/api/ai/replace-question', { questionId });
+  } catch (error) {
+    throw new Error(toUserMessage(error, 'Could not create a replacement question.'));
   }
-  if (data?.error) {
-    throw new Error(data.error as string);
-  }
-  return data as { mcqId: string };
 }
 
 /** Generates a chapter summary or a flashcard deck (stored and reused). */
@@ -107,44 +84,40 @@ export async function generateStudyKit(input: {
   kind: 'flashcards' | 'summary';
   count?: number;
 }): Promise<StudyContent> {
-  const { data, error } = await supabase.functions.invoke('study-kit', { body: input });
-
-  if (error) {
-    throw new Error(await toUserMessage(error, 'Could not create the study material.'));
+  try {
+    const result = await api.post<{ kind: string; content: StudyContent }>(
+      '/api/ai/study-kit',
+      input,
+    );
+    return result.content;
+  } catch (error) {
+    throw new Error(toUserMessage(error, 'Could not create the study material.'));
   }
-  if (data?.error) {
-    throw new Error(data.error as string);
-  }
-  return (data as { content: StudyContent }).content;
 }
 
-export type IngestBookInput =
-  | { mode: 'file'; bookId: string }
-  | { mode: 'text'; title: string; subject: string; author?: string; text: string };
-
-export async function ingestBook(
-  input: IngestBookInput,
-): Promise<{ bookId: string; chapters: number; queued?: boolean }> {
-  const { data, error } = await supabase.functions.invoke('ingest-book', { body: input });
-
-  if (error) {
-    throw new Error(await toUserMessage(error, 'Could not process this book.'));
+/** Builds a book (and its chapters) from pasted text. */
+export async function ingestBook(input: {
+  title: string;
+  subject: string;
+  author?: string;
+  text: string;
+}): Promise<{ bookId: string; chapters: number }> {
+  try {
+    return await api.post<{ bookId: string; chapters: number }>('/api/ai/ingest-book', {
+      mode: 'text',
+      ...input,
+    });
+  } catch (error) {
+    throw new Error(toUserMessage(error, 'Could not process this book.'));
   }
-  if (data?.error) {
-    throw new Error(data.error as string);
-  }
-  return data as { bookId: string; chapters: number; queued?: boolean };
 }
 
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
-  const { data, error } = await supabase.functions.invoke('delete-account', { body: {} });
-
-  if (error) {
-    throw new Error(await toUserMessage(error, 'Could not delete your account.'));
-  }
-  if (data?.error) {
-    throw new Error(data.error as string);
+  try {
+    await api.del('/api/account');
+  } catch (error) {
+    throw new Error(toUserMessage(error, 'Could not delete your account.'));
   }
 }
 
@@ -154,21 +127,13 @@ export async function flagQuestion(input: {
   reason: FlagReason;
   note?: string;
 }): Promise<void> {
-  const { data: userData } = await supabase.auth.getUser();
-  const user = userData?.user;
-  if (!user) throw new Error('You must be signed in.');
-
-  const { error } = await supabase.from('flags').upsert(
-    {
+  try {
+    await api.post('/api/flags', {
       question_id: input.questionId,
-      user_id: user.id,
       reason: input.reason,
       note: input.note ?? null,
-    },
-    { onConflict: 'question_id,user_id' },
-  );
-
-  if (error) {
-    throw new Error(`Could not send the report: ${error.message}`);
+    });
+  } catch (error) {
+    throw new Error(toUserMessage(error, 'Could not send the report.'));
   }
 }

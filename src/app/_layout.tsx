@@ -5,8 +5,8 @@ import { useEffect } from 'react';
 
 import { SetupScreen } from '@/components/SetupScreen';
 import { LoadingView } from '@/components/ui';
+import { isApiConfigured } from '@/lib/apiClient';
 import { AuthProvider, useAuth } from '@/lib/auth';
-import { isSupabaseConfigured } from '@/lib/supabase';
 import { colors } from '@/theme';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
@@ -52,7 +52,7 @@ function RootNavigator() {
     }
   }, [loading]);
 
-  if (!isSupabaseConfigured) {
+  if (!isApiConfigured) {
     return <SetupScreen />;
   }
 

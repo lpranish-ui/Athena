@@ -12,8 +12,8 @@ import {
 
 import { Screen } from '@/components/Screen';
 import { Badge, EmptyState, ErrorBanner } from '@/components/ui';
+import { api } from '@/lib/apiClient';
 import { formatRelative, percentage } from '@/lib/format';
-import { supabase } from '@/lib/supabase';
 import { colors, fontSize, spacing, withAlpha } from '@/theme';
 import type { Difficulty, McqSetWithContext } from '@/types';
 
@@ -37,58 +37,43 @@ export default function QuizzesScreen() {
   } | null>(null);
 
   const load = useCallback(async () => {
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    try {
+      const [setsData, plannerData] = await Promise.all([
+        api.get<McqSetWithContext[]>('/api/sets'),
+        api.get<{
+          dueCount: number;
+          totalChapters: number;
+          examDate: string | null;
+          targetExam: string | null;
+          attempts: { completed_at: string; score: number; total: number }[];
+        }>('/api/planner'),
+      ]);
 
-    const [setsResult, dueResult, profileResult, todayResult, chaptersResult] = await Promise.all([
-      supabase
-        .from('mcq_sets')
-        .select(
-          '*, chapter:chapters(id, title, number, book:books(id, title, subject)), attempts:quiz_attempts(id, score, total, completed_at)',
-        )
-        .order('created_at', { ascending: false }),
-      supabase
-        .from('reviews')
-        .select('id', { count: 'exact', head: true })
-        .lte('due_at', new Date().toISOString()),
-      supabase.from('profiles').select('exam_date, target_exam').maybeSingle(),
-      supabase
-        .from('quiz_attempts')
-        .select('total')
-        .gte('completed_at', todayStart.toISOString()),
-      supabase.from('chapters').select('id', { count: 'exact', head: true }),
-    ]);
-
-    if (setsResult.error) {
-      setError(setsResult.error.message);
-    } else {
       setError(null);
-      setSets((setsResult.data ?? []) as unknown as McqSetWithContext[]);
-    }
-    setDueCount(dueResult.count ?? 0);
+      setSets(setsData);
+      setDueCount(plannerData.dueCount);
 
-    const profile = profileResult.data as {
-      exam_date: string | null;
-      target_exam: string | null;
-    } | null;
-    if (profile?.exam_date) {
-      const daysLeft = Math.ceil(
-        (new Date(`${profile.exam_date}T00:00:00`).getTime() - Date.now()) / 86_400_000,
-      );
-      const todayAnswered = ((todayResult.data ?? []) as { total: number }[]).reduce(
-        (sum, row) => sum + (row.total ?? 0),
-        0,
-      );
-      setPlanner({
-        examLabel: profile.target_exam ?? 'your exam',
-        daysLeft,
-        todayAnswered,
-        chaptersTotal: chaptersResult.count ?? 0,
-      });
-    } else {
-      setPlanner(null);
+      if (plannerData.examDate) {
+        const daysLeft = Math.ceil(
+          (new Date(`${plannerData.examDate}T00:00:00`).getTime() - Date.now()) / 86_400_000,
+        );
+        const todayStart = new Date();
+        todayStart.setHours(0, 0, 0, 0);
+        const todayAnswered = plannerData.attempts
+          .filter((attempt) => new Date(attempt.completed_at).getTime() >= todayStart.getTime())
+          .reduce((sum, attempt) => sum + (attempt.total ?? 0), 0);
+        setPlanner({
+          examLabel: plannerData.targetExam ?? 'your exam',
+          daysLeft,
+          todayAnswered,
+          chaptersTotal: plannerData.totalChapters,
+        });
+      } else {
+        setPlanner(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load your quizzes.');
     }
-
     setLoading(false);
   }, []);
 

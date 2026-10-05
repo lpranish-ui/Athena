@@ -17,14 +17,14 @@ import { chatJson, getVerifyModel, MissingKeyError } from './ai.js';
 import { one, query } from './db.js';
 import { HttpError } from './http.js';
 import {
-  QUESTION_TYPES,
-  SYSTEM_PROMPT,
-  fixedChaptersSection,
-  normalizeForMatch,
-  parseQuestions,
-  requestSection,
-  validateQuestion,
-  withPageMarkers,
+    fixedChaptersSection,
+    normalizeForMatch,
+    parseQuestions,
+    QUESTION_TYPES,
+    requestSection,
+    SYSTEM_PROMPT,
+    validateQuestion,
+    withPageMarkers,
 } from './questions.js';
 
 const MIN_QUESTIONS = 5;

@@ -1,4 +1,4 @@
-// Shown when the app starts without Supabase environment variables configured.
+// Shown when the app starts without the API URL configured.
 
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -14,20 +14,19 @@ export function SetupScreen() {
         <Brand />
         <Text style={styles.title}>Almost there…</Text>
         <Text style={styles.body}>
-          Athena needs a Supabase project to store accounts, books and quizzes. Create a{' '}
+          Athena talks to its own API server for accounts, books and quizzes. Create a{' '}
           <Text style={styles.code}>.env</Text> file in the project root (copy{' '}
           <Text style={styles.code}>.env.example</Text>) and fill in:
         </Text>
         <Card style={styles.codeCard}>
           <Text style={styles.codeText}>
-            EXPO_PUBLIC_SUPABASE_URL=https://your-project.supabase.co{'\n'}
-            EXPO_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+            EXPO_PUBLIC_API_URL=https://athena-api-w018.onrender.com
           </Text>
         </Card>
         <Text style={styles.body}>
-          Then run the SQL files in <Text style={styles.code}>supabase/migrations/</Text> (then{' '}
-          <Text style={styles.code}>supabase/seed.sql</Text>) in your Supabase project’s SQL
-          Editor, deploy the edge functions, and restart the app.
+          The API lives in <Text style={styles.code}>server/</Text> (Node + Postgres, deployed on
+          Render). Restart the dev server after saving <Text style={styles.code}>.env</Text> so it
+          gets picked up.
         </Text>
         <Text style={styles.body}>The full walkthrough is in README.md.</Text>
       </View>

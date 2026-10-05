@@ -1,8 +1,5 @@
-// Authentication state for the whole app.
+// Authentication state for the whole app (backed by the Athena API).
 
-import type { Session, User } from '@supabase/supabase-js';
-import * as Linking from 'expo-linking';
-import * as WebBrowser from 'expo-web-browser';
 import {
     createContext,
     useCallback,
@@ -12,13 +9,22 @@ import {
     useState,
     type ReactNode,
 } from 'react';
-import { Platform } from 'react-native';
 
-import { isSupabaseConfigured, supabase } from './supabase';
+import { api, ApiError, isApiConfigured, loadStoredUser, loadToken, saveStoredUser, saveToken } from './apiClient';
+
+export interface AuthUser {
+  id: string;
+  email: string;
+}
+
+export interface AuthSession {
+  user: AuthUser;
+  token: string;
+}
 
 interface AuthContextValue {
-  session: Session | null;
-  user: User | null;
+  session: AuthSession | null;
+  user: AuthUser | null;
   loading: boolean;
   signIn: (email: string, password: string) => Promise<{ error: string | null }>;
   signInWithGoogle: () => Promise<{ error: string | null }>;
@@ -30,114 +36,100 @@ interface AuthContextValue {
   signOut: () => Promise<void>;
 }
 
-/** Extracts OAuth callback parameters from a deep-link URL (fragment or query). */
-function parseAuthCallback(url: string): Record<string, string> {
-  const hashIndex = url.indexOf('#');
-  const queryIndex = url.indexOf('?');
-  const raw =
-    hashIndex >= 0 ? url.slice(hashIndex + 1) : queryIndex >= 0 ? url.slice(queryIndex + 1) : '';
-  const params: Record<string, string> = {};
-  for (const pair of raw.split('&')) {
-    const separator = pair.indexOf('=');
-    if (separator <= 0) continue;
-    params[decodeURIComponent(pair.slice(0, separator))] = decodeURIComponent(
-      pair.slice(separator + 1),
-    );
-  }
-  return params;
-}
-
 const AuthContext = createContext<AuthContextValue | undefined>(undefined);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  // Nothing to load when Supabase isn't configured yet.
-  const [loading, setLoading] = useState(isSupabaseConfigured);
+  const [session, setSession] = useState<AuthSession | null>(null);
+  // Nothing to load when the API isn't configured yet.
+  const [loading, setLoading] = useState(isApiConfigured);
 
   useEffect(() => {
-    if (!isSupabaseConfigured) return;
+    if (!isApiConfigured) return;
 
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (!mounted) return;
-      setSession(data.session);
-      setLoading(false);
-    });
+    (async () => {
+      try {
+        const token = await loadToken();
+        if (!token) return;
 
-    const { data: subscription } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      setSession(nextSession);
-    });
+        // Open optimistically with the stored user, then validate in the
+        // background so the app also works with a flaky connection.
+        const storedUser = await loadStoredUser();
+        if (storedUser && mounted) {
+          setSession({ user: storedUser, token });
+        }
+
+        try {
+          const me = await api.get<{ user: AuthUser }>('/api/me', token);
+          if (mounted) setSession({ user: me.user, token });
+          await saveStoredUser(me.user);
+        } catch (error) {
+          if (error instanceof ApiError && error.status === 401) {
+            // The token expired or the account was deleted — sign out.
+            await saveToken(null);
+            await saveStoredUser(null);
+            if (mounted) setSession(null);
+          }
+          // Network errors: keep the stored session; the API retries later.
+        }
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
 
     return () => {
       mounted = false;
-      subscription.subscription.unsubscribe();
     };
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    return { error: error ? error.message : null };
+    try {
+      const result = await api.post<{ token: string; user: AuthUser }>(
+        '/api/auth/signin',
+        { email, password },
+        null,
+      );
+      await saveToken(result.token);
+      await saveStoredUser(result.user);
+      setSession({ user: result.user, token: result.token });
+      return { error: null };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : 'Could not sign you in.' };
+    }
   }, []);
 
   const signInWithGoogle = useCallback(async () => {
-    const isWeb = Platform.OS === 'web';
-
-    // Web: Supabase redirects the current tab. Mobile: open the provider in a
-    // secure in-app browser and capture the deep-link callback ourselves.
-    const redirectTo = isWeb
-      ? (globalThis as { location?: { origin?: string } }).location?.origin
-      : Linking.createURL('/');
-
-    const { data, error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        ...(redirectTo ? { redirectTo } : {}),
-        skipBrowserRedirect: !isWeb,
-      },
-    });
-
-    if (error) return { error: error.message };
-    if (isWeb) return { error: null };
-
-    if (!data?.url || !redirectTo) {
-      return { error: 'Could not start Google sign-in.' };
-    }
-
-    const result = await WebBrowser.openAuthSessionAsync(data.url, redirectTo);
-    if (result.type !== 'success' || !result.url) {
-      return { error: null }; // the student cancelled
-    }
-
-    const params = parseAuthCallback(result.url);
-    if (params.error_description) return { error: params.error_description };
-    if (!params.access_token || !params.refresh_token) {
-      return {
-        error:
-          'Google sign-in did not return a session. Check the redirect URLs in your Supabase auth settings.',
-      };
-    }
-
-    const { error: sessionError } = await supabase.auth.setSession({
-      access_token: params.access_token,
-      refresh_token: params.refresh_token,
-    });
-    return { error: sessionError ? sessionError.message : null };
+    // Google sign-in will be wired to the API in a later update.
+    return {
+      error:
+        'Google sign-in is coming in a later update. Please use your email and password for now.',
+    };
   }, []);
 
   const signUp = useCallback(async (email: string, password: string, fullName: string) => {
-    const { data, error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: { data: { full_name: fullName } },
-    });
-    if (error) return { error: error.message, needsConfirmation: false };
-    // When email confirmation is switched on, Supabase returns no session.
-    return { error: null, needsConfirmation: !data.session };
+    try {
+      const result = await api.post<{ token: string; user: AuthUser; needsConfirmation?: boolean }>(
+        '/api/auth/signup',
+        { email, password, full_name: fullName },
+        null,
+      );
+      await saveToken(result.token);
+      await saveStoredUser(result.user);
+      setSession({ user: result.user, token: result.token });
+      return { error: null, needsConfirmation: result.needsConfirmation ?? false };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : 'Could not create your account.',
+        needsConfirmation: false,
+      };
+    }
   }, []);
 
   const signOut = useCallback(async () => {
-    await supabase.auth.signOut();
+    await saveToken(null);
+    await saveStoredUser(null);
+    setSession(null);
   }, []);
 
   const value = useMemo<AuthContextValue>(

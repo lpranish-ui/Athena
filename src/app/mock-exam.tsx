@@ -9,9 +9,9 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
 import { Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
-import { useAuth } from '@/lib/auth';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
+import type { QuestionType } from '@/types';
 
 const COUNT_OPTIONS = [20, 40] as const;
 
@@ -22,15 +22,28 @@ interface BookOption {
   questionIds: string[];
 }
 
-interface QuestionRow {
+/** A question row as returned by GET /api/mcqs. */
+interface QuestionFull {
   id: string;
-  chapter: { book_id: string; book: { id: string; title: string; subject: string } | null } | null;
+  chapter_id: string | null;
+  question: string;
+  options: string[];
+  correct_index: number;
+  explanation: string | null;
+  option_explanations: string[] | null;
+  question_type: QuestionType;
+  source_page: number | null;
+  supporting_quote: string | null;
+  topic: string | null;
+  book_id: string | null;
+  book_title: string | null;
+  book_subject: string | null;
 }
 
 export default function MockExamScreen() {
   const router = useRouter();
-  const { user } = useAuth();
 
+  const [allQuestions, setAllQuestions] = useState<QuestionFull[]>([]);
   const [books, setBooks] = useState<BookOption[]>([]);
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
   const [count, setCount] = useState<number>(20);
@@ -39,34 +52,30 @@ export default function MockExamScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data, error: loadError } = await supabase
-      .from('mcqs')
-      .select('id, chapter:chapters!inner(book_id, book:books(id, title, subject))')
-      .limit(1000);
+    try {
+      const rows = await api.get<QuestionFull[]>('/api/mcqs?limit=500');
+      setAllQuestions(rows);
+      setError(null);
 
-    if (loadError) {
-      setError(loadError.message);
-      setLoading(false);
-      return;
+      const grouped = new Map<string, BookOption>();
+      for (const row of rows) {
+        if (!row.book_id || !row.book_title) continue;
+        const entry = grouped.get(row.book_id) ?? {
+          id: row.book_id,
+          title: row.book_title,
+          subject: row.book_subject ?? 'General',
+          questionIds: [],
+        };
+        entry.questionIds.push(row.id);
+        grouped.set(row.book_id, entry);
+      }
+
+      const list = [...grouped.values()].sort((a, b) => b.questionIds.length - a.questionIds.length);
+      setBooks(list);
+      setSelectedBookId(list[0]?.id ?? null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load your questions.');
     }
-
-    const grouped = new Map<string, BookOption>();
-    for (const row of (data ?? []) as unknown as QuestionRow[]) {
-      const book = row.chapter?.book;
-      if (!book || !row.chapter) continue;
-      const entry = grouped.get(book.id) ?? {
-        id: book.id,
-        title: book.title,
-        subject: book.subject,
-        questionIds: [],
-      };
-      entry.questionIds.push(row.id);
-      grouped.set(book.id, entry);
-    }
-
-    const list = [...grouped.values()].sort((a, b) => b.questionIds.length - a.questionIds.length);
-    setBooks(list);
-    setSelectedBookId(list[0]?.id ?? null);
     setLoading(false);
   }, []);
 
@@ -77,7 +86,7 @@ export default function MockExamScreen() {
   );
 
   const start = async () => {
-    if (!user || !selectedBookId) return;
+    if (!selectedBookId) return;
     const book = books.find((entry) => entry.id === selectedBookId);
     if (!book) return;
 
@@ -88,37 +97,11 @@ export default function MockExamScreen() {
       const shuffled = [...book.questionIds].sort(() => Math.random() - 0.5);
       const sampled = shuffled.slice(0, Math.min(count, shuffled.length));
 
-      const { data: rows, error: rowsError } = await supabase
-        .from('mcqs')
-        .select('*')
-        .in('id', sampled);
-      if (rowsError || !rows || rows.length === 0) {
-        throw new Error(rowsError?.message ?? 'No questions available for this book.');
-      }
-
-      const { data: set, error: setError } = await supabase
-        .from('mcq_sets')
-        .insert({
-          chapter_id: null,
-          chapter_ids: null,
-          user_id: user.id,
-          title: `Mock exam — ${book.title}`,
-          difficulty: 'medium',
-          status: 'ready',
-        })
-        .select('id')
-        .single();
-      if (setError || !set) {
-        throw new Error(setError?.message ?? 'Could not create the mock exam.');
-      }
-
-      // Copy the sampled questions into the new set (older→newest order kept).
-      const order = new Map(sampled.map((id, index) => [id, index]));
-      const copies = (rows as Record<string, unknown>[])
-        .sort((a, b) => (order.get(a.id as string) ?? 0) - (order.get(b.id as string) ?? 0))
-        .map((row, index) => ({
-          set_id: set.id,
-          position: index + 1,
+      const byId = new Map(allQuestions.map((row) => [row.id, row]));
+      const copies = sampled
+        .map((questionId) => byId.get(questionId))
+        .filter((row): row is QuestionFull => row !== undefined)
+        .map((row) => ({
           question: row.question,
           options: row.options,
           correct_index: row.correct_index,
@@ -131,13 +114,24 @@ export default function MockExamScreen() {
           chapter_id: row.chapter_id,
         }));
 
-      const { error: copyError } = await supabase.from('mcqs').insert(copies);
-      if (copyError) {
-        await supabase.from('mcq_sets').delete().eq('id', set.id);
-        throw new Error(copyError.message);
+      if (copies.length === 0) {
+        throw new Error('No questions available for this book.');
       }
 
-      router.push({ pathname: '/quiz/[id]', params: { id: set.id as string } });
+      const created = await api.post<{ id: string }>('/api/sets', {
+        title: `Mock exam — ${book.title}`,
+        difficulty: 'medium',
+      });
+
+      // Copy the sampled questions into the new set (server assigns positions).
+      try {
+        await api.post(`/api/sets/${created.id}/questions`, { questions: copies });
+      } catch (copyError) {
+        await api.del(`/api/sets/${created.id}`).catch(() => {});
+        throw copyError;
+      }
+
+      router.push({ pathname: '/quiz/[id]', params: { id: created.id } });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not build the mock exam.');
     } finally {

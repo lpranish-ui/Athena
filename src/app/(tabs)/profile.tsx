@@ -9,9 +9,9 @@ import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from '
 import { Screen } from '@/components/Screen';
 import { Button, Card, ErrorBanner, Input } from '@/components/ui';
 import { deleteAccount } from '@/lib/api';
+import { api } from '@/lib/apiClient';
 import { useAuth } from '@/lib/auth';
 import { initials } from '@/lib/format';
-import { supabase } from '@/lib/supabase';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import type { Profile } from '@/types';
 
@@ -32,19 +32,6 @@ function examDaysLabelFor(dateText: string): string | null {
   const diff = Math.ceil((new Date(`${trimmed}T00:00:00`).getTime() - Date.now()) / 86_400_000);
   if (!Number.isFinite(diff)) return null;
   return diff >= 0 ? `${diff} days to go` : 'This date is in the past';
-}
-
-interface ProgressRow {
-  score: number;
-  total: number;
-  set: {
-    chapter: {
-      id: string;
-      number: number;
-      title: string;
-      book: { title: string; subject: string } | null;
-    } | null;
-  } | null;
 }
 
 interface SubjectStat {
@@ -90,88 +77,95 @@ export default function ProfileScreen() {
   const load = useCallback(async () => {
     if (!user) return;
 
-    const [profileResult, attemptsCountResult, booksResult, progressResult] = await Promise.all([
-      supabase.from('profiles').select('*').eq('id', user.id).maybeSingle(),
-      supabase.from('quiz_attempts').select('id', { count: 'exact', head: true }),
-      supabase.from('books').select('id', { count: 'exact', head: true }).eq('owner_id', user.id),
-      supabase
-        .from('quiz_attempts')
-        .select(
-          'score, total, set:mcq_sets(chapter:chapters(id, number, title, book:books(title, subject)))',
-        ),
-    ]);
+    try {
+      const [profile, progress, books] = await Promise.all([
+        api.get<Profile | null>('/api/profile'),
+        api.get<{
+          count: number;
+          attempts: {
+            score: number;
+            total: number;
+            chapter_id: string | null;
+            chapter_title: string | null;
+            book_title: string | null;
+            book_subject: string | null;
+          }[];
+        }>('/api/attempts'),
+        api.get<{ is_default: boolean; owner_id: string | null }[]>('/api/books'),
+      ]);
 
-    const profile = profileResult.data as Profile | null;
-    if (profile) {
-      setFullName(profile.full_name ?? '');
-      setSchool(profile.school ?? '');
-      setYear(profile.year_of_study ? String(profile.year_of_study) : '');
-      setCountry(profile.country ?? '');
-      setTargetExam(profile.target_exam ?? '');
-      setExamDate(profile.exam_date ?? '');
-      setExamDaysLabel(profile.exam_date ? examDaysLabelFor(profile.exam_date) : null);
+      if (profile) {
+        setFullName(profile.full_name ?? '');
+        setSchool(profile.school ?? '');
+        setYear(profile.year_of_study ? String(profile.year_of_study) : '');
+        setCountry(profile.country ?? '');
+        setTargetExam(profile.target_exam ?? '');
+        setExamDate(profile.exam_date ?? '');
+        setExamDaysLabel(profile.exam_date ? examDaysLabelFor(profile.exam_date) : null);
+      }
+
+      const rows = progress.attempts;
+      const totalQuestions = rows.reduce((sum, row) => sum + row.total, 0);
+      const totalScore = rows.reduce((sum, row) => sum + row.score, 0);
+
+      setStats({
+        books: books.filter((book) => !book.is_default && book.owner_id === user.id).length,
+        attempts: progress.count,
+        avg: totalQuestions > 0 ? Math.round((totalScore / totalQuestions) * 100) : 0,
+      });
+
+      // Progress by subject + weak chapters.
+      const subjects = new Map<string, { score: number; total: number; attempts: number }>();
+      const chapters = new Map<string, ChapterStat & { score: number; total: number }>();
+
+      for (const row of rows) {
+        if (!row.chapter_id) continue;
+        const subject = row.book_subject ?? 'General';
+
+        const subjectEntry = subjects.get(subject) ?? { score: 0, total: 0, attempts: 0 };
+        subjectEntry.score += row.score;
+        subjectEntry.total += row.total;
+        subjectEntry.attempts += 1;
+        subjects.set(subject, subjectEntry);
+
+        const chapterEntry = chapters.get(row.chapter_id) ?? {
+          key: row.chapter_id,
+          title: row.chapter_title ?? 'Chapter',
+          book: row.book_title ?? 'Book',
+          avg: 0,
+          questions: 0,
+          score: 0,
+          total: 0,
+        };
+        chapterEntry.score += row.score;
+        chapterEntry.total += row.total;
+        chapterEntry.questions = chapterEntry.total;
+        chapterEntry.avg =
+          chapterEntry.total > 0 ? Math.round((chapterEntry.score / chapterEntry.total) * 100) : 0;
+        chapters.set(row.chapter_id, chapterEntry);
+      }
+
+      setSubjectStats(
+        [...subjects.entries()]
+          .map(([subject, entry]) => ({
+            subject,
+            attempts: entry.attempts,
+            avg: entry.total > 0 ? Math.round((entry.score / entry.total) * 100) : 0,
+          }))
+          .sort((a, b) => b.attempts - a.attempts)
+          .slice(0, 6),
+      );
+
+      setWeakChapters(
+        [...chapters.values()]
+          .filter((chapter) => chapter.questions >= 5 && chapter.avg < 70)
+          .sort((a, b) => a.avg - b.avg)
+          .slice(0, 5)
+          .map(({ key, title, book, avg, questions }) => ({ key, title, book, avg, questions })),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load your profile.');
     }
-
-    const rows = (progressResult.data ?? []) as unknown as ProgressRow[];
-    const totalQuestions = rows.reduce((sum, row) => sum + row.total, 0);
-    const totalScore = rows.reduce((sum, row) => sum + row.score, 0);
-
-    setStats({
-      books: booksResult.count ?? 0,
-      attempts: attemptsCountResult.count ?? 0,
-      avg: totalQuestions > 0 ? Math.round((totalScore / totalQuestions) * 100) : 0,
-    });
-
-    // Progress by subject + weak chapters.
-    const subjects = new Map<string, { score: number; total: number; attempts: number }>();
-    const chapters = new Map<string, ChapterStat & { score: number; total: number }>();
-
-    for (const row of rows) {
-      const chapter = row.set?.chapter;
-      if (!chapter) continue;
-      const subject = chapter.book?.subject ?? 'General';
-
-      const subjectEntry = subjects.get(subject) ?? { score: 0, total: 0, attempts: 0 };
-      subjectEntry.score += row.score;
-      subjectEntry.total += row.total;
-      subjectEntry.attempts += 1;
-      subjects.set(subject, subjectEntry);
-
-      const chapterEntry = chapters.get(chapter.id) ?? {
-        key: chapter.id,
-        title: chapter.title,
-        book: chapter.book?.title ?? 'Book',
-        avg: 0,
-        questions: 0,
-        score: 0,
-        total: 0,
-      };
-      chapterEntry.score += row.score;
-      chapterEntry.total += row.total;
-      chapterEntry.questions = chapterEntry.total;
-      chapterEntry.avg =
-        chapterEntry.total > 0 ? Math.round((chapterEntry.score / chapterEntry.total) * 100) : 0;
-      chapters.set(chapter.id, chapterEntry);
-    }
-
-    setSubjectStats(
-      [...subjects.entries()]
-        .map(([subject, entry]) => ({
-          subject,
-          attempts: entry.attempts,
-          avg: entry.total > 0 ? Math.round((entry.score / entry.total) * 100) : 0,
-        }))
-        .sort((a, b) => b.attempts - a.attempts)
-        .slice(0, 6),
-    );
-
-    setWeakChapters(
-      [...chapters.values()]
-        .filter((chapter) => chapter.questions >= 5 && chapter.avg < 70)
-        .sort((a, b) => a.avg - b.avg)
-        .slice(0, 5)
-        .map(({ key, title, book, avg, questions }) => ({ key, title, book, avg, questions })),
-    );
   }, [user]);
 
   useFocusEffect(
@@ -188,25 +182,23 @@ export default function ProfileScreen() {
 
     const parsedYear = Number.parseInt(year, 10);
     const validExamDate = /^\d{4}-\d{2}-\d{2}$/.test(examDate.trim());
-    const { error: saveError } = await supabase.from('profiles').upsert({
-      id: user.id,
-      full_name: fullName.trim() || null,
-      school: school.trim() || null,
-      year_of_study: Number.isFinite(parsedYear) ? parsedYear : null,
-      country: country.trim() || null,
-      target_exam: targetExam.trim() || null,
-      exam_date: validExamDate ? examDate.trim() : null,
-      updated_at: new Date().toISOString(),
-    });
 
-    setSaving(false);
-    if (saveError) {
-      setError(saveError.message);
-      return;
+    try {
+      await api.put('/api/profile', {
+        full_name: fullName.trim() || null,
+        school: school.trim() || null,
+        year_of_study: Number.isFinite(parsedYear) ? parsedYear : null,
+        country: country.trim() || null,
+        target_exam: targetExam.trim() || null,
+        exam_date: validExamDate ? examDate.trim() : null,
+      });
+      setSaved(true);
+      setExamDaysLabel(examDaysLabelFor(examDate));
+      setTimeout(() => setSaved(false), 2500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save your profile.');
     }
-    setSaved(true);
-    setExamDaysLabel(examDaysLabelFor(examDate));
-    setTimeout(() => setSaved(false), 2500);
+    setSaving(false);
   };
 
   const doDeleteAccount = async () => {

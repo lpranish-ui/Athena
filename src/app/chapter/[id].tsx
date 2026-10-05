@@ -12,10 +12,16 @@ import {
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
 import { generateQuiz, generateStudyKit } from '@/lib/api';
+import { api } from '@/lib/apiClient';
 import { formatRelative } from '@/lib/format';
-import { supabase } from '@/lib/supabase';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
-import type { ChapterWithBook, Difficulty, QuestionType, StudyMaterial } from '@/types';
+import type {
+  ChapterWithBook,
+  Difficulty,
+  McqSetWithContext,
+  QuestionType,
+  StudyMaterial,
+} from '@/types';
 
 interface SetRow {
   id: string;
@@ -99,33 +105,32 @@ export default function ChapterScreen() {
   const load = useCallback(async () => {
     if (!id) return;
 
-    const [chapterResult, setsResult, materialsResult] = await Promise.all([
-      supabase
-        .from('chapters')
-        .select('*, book:books(id, title, subject)')
-        .eq('id', id)
-        .maybeSingle(),
-      supabase
-        .from('mcq_sets')
-        .select('id, title, difficulty, created_at')
-        .eq('chapter_id', id)
-        .order('created_at', { ascending: false }),
-      supabase.from('study_materials').select('*').eq('chapter_id', id),
-    ]);
+    try {
+      const [chapterData, setsData, materialsList] = await Promise.all([
+        api.get<ChapterWithBook>(`/api/chapters/${id}`),
+        api.get<McqSetWithContext[]>('/api/sets'),
+        api.get<StudyMaterial[]>(`/api/study-materials?chapter_id=${id}`),
+      ]);
 
-    if (chapterResult.data) {
-      setChapter(chapterResult.data as unknown as ChapterWithBook);
+      setChapter(chapterData);
       setError(null);
-    } else {
-      setError('Chapter not found.');
+      setSets(
+        setsData
+          .filter((set) => set.chapter_id === id || (set.chapter_ids ?? []).includes(id))
+          .map((set) => ({
+            id: set.id,
+            title: set.title,
+            difficulty: set.difficulty,
+            created_at: set.created_at,
+          })),
+      );
+      setMaterials({
+        flashcards: materialsList.find((material) => material.kind === 'flashcards') ?? null,
+        summary: materialsList.find((material) => material.kind === 'summary') ?? null,
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Chapter not found.');
     }
-    setSets((setsResult.data ?? []) as SetRow[]);
-
-    const materialsList = (materialsResult.data ?? []) as StudyMaterial[];
-    setMaterials({
-      flashcards: materialsList.find((material) => material.kind === 'flashcards') ?? null,
-      summary: materialsList.find((material) => material.kind === 'summary') ?? null,
-    });
     setLoading(false);
   }, [id]);
 

@@ -8,7 +8,7 @@ import { ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Screen } from '@/components/Screen';
 import { Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { generateStudyKit } from '@/lib/api';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import type { StudyMaterial } from '@/types';
 
@@ -25,19 +25,17 @@ export default function SummaryScreen() {
   const load = useCallback(async () => {
     if (!chapterId) return;
 
-    const [materialResult, chapterResult] = await Promise.all([
-      supabase
-        .from('study_materials')
-        .select('*')
-        .eq('chapter_id', chapterId)
-        .eq('kind', 'summary')
-        .maybeSingle(),
-      supabase.from('chapters').select('title').eq('id', chapterId).maybeSingle(),
-    ]);
+    try {
+      const [materials, chapter] = await Promise.all([
+        api.get<StudyMaterial[]>(`/api/study-materials?chapter_id=${chapterId}`),
+        api.get<{ title: string }>(`/api/chapters/${chapterId}`),
+      ]);
 
-    setMaterial((materialResult.data as StudyMaterial | null) ?? null);
-    if (chapterResult.data) {
-      setChapterTitle((chapterResult.data as { title: string }).title);
+      setMaterial(materials.find((entry) => entry.kind === 'summary') ?? null);
+      setChapterTitle(chapter.title);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the summary.');
     }
     setLoading(false);
   }, [chapterId]);

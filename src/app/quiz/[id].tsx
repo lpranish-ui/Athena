@@ -11,12 +11,11 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { flagQuestion, replaceQuestion } from '@/lib/api';
-import { useAuth } from '@/lib/auth';
+import { api } from '@/lib/apiClient';
 import { percentage } from '@/lib/format';
 import { scheduleReview } from '@/lib/review';
-import { supabase } from '@/lib/supabase';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
-import type { FlagReason, Mcq, McqSetWithContext, QuizMode, Review } from '@/types';
+import type { FlagReason, Mcq, McqSetWithContext, QuizMode } from '@/types';
 
 const LETTERS = 'ABCDEFGH';
 
@@ -163,7 +162,6 @@ function Citation({ mcq }: { mcq: Mcq }) {
 export default function QuizScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
-  const { user } = useAuth();
 
   const [set, setSet] = useState<McqSetWithContext | null>(null);
   const [mcqs, setMcqs] = useState<Mcq[]>([]);
@@ -182,39 +180,29 @@ export default function QuizScreen() {
   const load = useCallback(async () => {
     if (!id) return;
 
-    const [setResult, mcqResult] = await Promise.all([
-      supabase
-        .from('mcq_sets')
-        .select('*, chapter:chapters(id, title, number, book:books(id, title, subject))')
-        .eq('id', id)
-        .maybeSingle(),
-      supabase.from('mcqs').select('*').eq('set_id', id).order('position', { ascending: true }),
-    ]);
+    try {
+      const data = await api.get<{
+        set: McqSetWithContext;
+        mcqs: Mcq[];
+        flaggedIds: string[];
+        chapters: {
+          id: string;
+          title: string;
+          number: number;
+          book: { id: string; title: string; subject: string };
+        }[];
+      }>(`/api/sets/${id}`);
 
-    if (setResult.data) {
-      setSet(setResult.data as unknown as McqSetWithContext);
-    } else {
-      setError('Quiz not found.');
+      setSet({ ...data.set, chapter: data.chapters[0] ?? null });
+      setError(null);
+
+      const flagged = new Set(data.flaggedIds);
+      const visible = data.mcqs.filter((mcq) => !flagged.has(mcq.id));
+      setMcqs(visible);
+      setHiddenCount(data.mcqs.length - visible.length);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Quiz not found.');
     }
-
-    const all = (mcqResult.data ?? []) as Mcq[];
-    let flagged = new Set<string>();
-    if (all.length > 0) {
-      const { data: flagRows } = await supabase
-        .from('flags')
-        .select('question_id')
-        .in(
-          'question_id',
-          all.map((mcq) => mcq.id),
-        );
-      flagged = new Set(
-        (flagRows ?? []).map((row) => (row as { question_id: string }).question_id),
-      );
-    }
-
-    const visible = all.filter((mcq) => !flagged.has(mcq.id));
-    setMcqs(visible);
-    setHiddenCount(all.length - visible.length);
     setLoading(false);
   }, [id]);
 
@@ -253,50 +241,48 @@ export default function QuizScreen() {
 
   const finish = async () => {
     setPhase('done');
-    if (!user || mcqs.length === 0) return;
+    if (mcqs.length === 0) return;
     setSaving(true);
-    const { error: saveError } = await supabase.from('quiz_attempts').insert({
-      set_id: id,
-      user_id: user.id,
-      score,
-      total: mcqs.length,
-      answers,
-      mode,
-      duration_seconds: elapsed,
-    });
-    if (saveError) {
-      setError(`Your score could not be saved: ${saveError.message}`);
+
+    try {
+      await api.post(`/api/sets/${id}/attempts`, {
+        score,
+        total: mcqs.length,
+        answers,
+        mode,
+        duration_seconds: elapsed,
+      });
+    } catch (err) {
+      setError(
+        `Your score could not be saved: ${err instanceof Error ? err.message : 'unknown error'}`,
+      );
     }
 
     // Spaced repetition: missed questions (and questions already in review)
     // are rescheduled — correct answers stretch the interval out.
     try {
-      const questionIds = mcqs.map((mcq) => mcq.id);
-      const { data: existingReviews } = await supabase
-        .from('reviews')
-        .select('question_id, stability, difficulty, reps, lapses')
-        .in('question_id', questionIds);
+      const existing = await api.get<
+        {
+          question_id: string;
+          stability: number;
+          difficulty: number;
+          reps: number;
+          lapses: number;
+        }[]
+      >(`/api/sets/${id}/reviews`);
 
-      const byQuestion = new Map(
-        (existingReviews ?? []).map((row) => {
-          const reviewRow = row as Pick<
-            Review,
-            'question_id' | 'stability' | 'difficulty' | 'reps' | 'lapses'
-          >;
-          return [reviewRow.question_id, reviewRow];
-        }),
-      );
+      const byQuestion = new Map(existing.map((row) => [row.question_id, row]));
 
-      const rows = mcqs.flatMap((mcq, index) => {
-        const correct = answers[index] === mcq.correct_index;
-        const existing = byQuestion.get(mcq.id);
-        if (!existing && correct) return []; // only track missed questions first
-        const schedule = scheduleReview(existing ?? null, correct);
-        return [{ user_id: user.id, question_id: mcq.id, ...schedule }];
+      const rows = mcqs.flatMap((mcq, mcqIndex) => {
+        const correct = answers[mcqIndex] === mcq.correct_index;
+        const prior = byQuestion.get(mcq.id);
+        if (!prior && correct) return []; // only track missed questions first
+        const schedule = scheduleReview(prior ?? null, correct);
+        return [{ question_id: mcq.id, ...schedule }];
       });
 
       if (rows.length > 0) {
-        await supabase.from('reviews').upsert(rows, { onConflict: 'user_id,question_id' });
+        await api.post('/api/reviews', { rows });
       }
     } catch {
       // Review scheduling is best-effort — never blocks the results screen.

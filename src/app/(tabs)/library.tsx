@@ -14,7 +14,7 @@ import {
 import { BookCard } from '@/components/BookCard';
 import { Screen } from '@/components/Screen';
 import { Button, EmptyState, ErrorBanner, Input } from '@/components/ui';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, spacing, withAlpha } from '@/theme';
 import type { BookWithCounts } from '@/types';
 
@@ -28,22 +28,12 @@ export default function LibraryScreen() {
   const [subjectFilter, setSubjectFilter] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const { data, error: loadError } = await supabase
-      .from('books')
-      .select('*, chapters(count)')
-      .order('is_default', { ascending: false })
-      .order('created_at', { ascending: false });
-
-    if (loadError) {
-      setError(loadError.message);
-    } else {
+    try {
+      const data = await api.get<BookWithCounts[]>('/api/books');
       setError(null);
-      setBooks(
-        (data ?? []).map((row) => {
-          const { chapters, ...book } = row as BookWithCounts & { chapters?: { count: number }[] };
-          return { ...book, chapter_count: chapters?.[0]?.count ?? 0 };
-        }),
-      );
+      setBooks(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the library.');
     }
     setLoading(false);
     setRefreshing(false);

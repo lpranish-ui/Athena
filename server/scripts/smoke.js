@@ -56,13 +56,7 @@ try {
   process.exitCode = 1;
 }
 
-if (!token) {
-  console.log(results.join('\n'));
-  process.exitCode = 1;
-  process.exit(1);
-}
-
-// ── 3. library + chapters ────────────────────────────────────────────────────
+// ── 2. auth ──────────────────────────────────────────────────────────────────
 
 const email = 'smoke-test@athena.dev';
 const password = 'password123';
@@ -87,8 +81,8 @@ try {
 
 if (!token) {
   console.log(results.join('\n'));
-  process.exit(1);
-}
+  process.exitCode = 1;
+} else {
 
 // ── 3. library + chapters ────────────────────────────────────────────────────
 
@@ -242,6 +236,7 @@ try {
 } catch (error) {
   fail('account deletion', error.message);
 }
+} // end of signed-in checks
 
 // ── summary ──────────────────────────────────────────────────────────────────
 

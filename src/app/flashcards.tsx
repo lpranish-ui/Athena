@@ -7,7 +7,7 @@ import { Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from '
 
 import { Screen } from '@/components/Screen';
 import { Button, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import type { Flashcard, StudyMaterial } from '@/types';
 
@@ -26,20 +26,18 @@ export default function FlashcardsScreen() {
   const load = useCallback(async () => {
     if (!chapterId) return;
 
-    const [materialResult, chapterResult] = await Promise.all([
-      supabase
-        .from('study_materials')
-        .select('*')
-        .eq('chapter_id', chapterId)
-        .eq('kind', 'flashcards')
-        .maybeSingle(),
-      supabase.from('chapters').select('title').eq('id', chapterId).maybeSingle(),
-    ]);
+    try {
+      const [materials, chapter] = await Promise.all([
+        api.get<StudyMaterial[]>(`/api/study-materials?chapter_id=${chapterId}`),
+        api.get<{ title: string }>(`/api/chapters/${chapterId}`),
+      ]);
 
-    const material = materialResult.data as StudyMaterial | null;
-    setCards(material?.content.cards ?? []);
-    if (chapterResult.data) {
-      setChapterTitle((chapterResult.data as { title: string }).title);
+      const material = materials.find((entry) => entry.kind === 'flashcards') ?? null;
+      setCards(material?.content.cards ?? []);
+      setChapterTitle(chapter.title);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not load the flashcards.');
     }
     setLoading(false);
   }, [chapterId]);

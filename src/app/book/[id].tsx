@@ -13,8 +13,7 @@ import {
 
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
-import { ingestBook } from '@/lib/api';
-import { supabase } from '@/lib/supabase';
+import { api } from '@/lib/apiClient';
 import { colors, fontSize, getSubjectColor, radius, spacing, withAlpha } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';
 
@@ -31,22 +30,15 @@ export default function BookScreen() {
   const load = useCallback(async () => {
     if (!id) return;
 
-    const [bookResult, chaptersResult] = await Promise.all([
-      supabase.from('books').select('*').eq('id', id).maybeSingle(),
-      supabase
-        .from('chapters')
-        .select('id, book_id, number, title, first_page, last_page')
-        .eq('book_id', id)
-        .order('number', { ascending: true }),
-    ]);
-
-    if (bookResult.error || !bookResult.data) {
-      setError(bookResult.error?.message ?? 'Book not found.');
-    } else {
-      setBook(bookResult.data as Book);
+    try {
+      const bookData = await api.get<Book>(`/api/books/${id}`);
+      setBook(bookData);
       setError(null);
+      const chaptersData = await api.get<ChapterSummary[]>(`/api/books/${id}/chapters`);
+      setChapters(chaptersData);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Book not found.');
     }
-    setChapters((chaptersResult.data ?? []) as ChapterSummary[]);
     setLoading(false);
   }, [id]);
 
@@ -56,29 +48,11 @@ export default function BookScreen() {
     }, [load]),
   );
 
-  const retryProcessing = async () => {
-    if (!book) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await ingestBook({ mode: 'file', bookId: book.id });
-      await load();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not process this book.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const doDelete = async () => {
     if (!book) return;
     setBusy(true);
     try {
-      if (book.file_path) {
-        await supabase.storage.from('books').remove([book.file_path]);
-      }
-      const { error: deleteError } = await supabase.from('books').delete().eq('id', book.id);
-      if (deleteError) throw new Error(deleteError.message);
+      await api.del(`/api/books/${book.id}`);
       router.back();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not delete this book.');
@@ -154,25 +128,14 @@ export default function BookScreen() {
 
         {error ? <ErrorBanner message={error} /> : null}
 
-        {book.status === 'queued' ? (
-          <Card style={styles.notice}>
-            <Text style={styles.noticeTitle}>Waiting for OCR…</Text>
-            <Text style={styles.noticeText}>
-              This looks like a scanned PDF, so it was queued for Athena’s OCR worker. Once the
-              worker is running (see worker/README.md) the book finishes processing on its own —
-              reopen this screen to check.
-            </Text>
-            <Button label="Check again" small onPress={() => void load()} />
-          </Card>
-        ) : null}
-
         {book.status === 'processing' ? (
           <Card style={styles.notice}>
             <Text style={styles.noticeTitle}>Still processing…</Text>
             <Text style={styles.noticeText}>
-              This book has not finished being split into chapters. You can retry below.
+              This book has not finished being split into chapters yet. Reopen this screen in a
+              moment to check.
             </Text>
-            <Button label="Retry processing" small onPress={() => void retryProcessing()} loading={busy} />
+            <Button label="Check again" small onPress={() => void load()} loading={busy} />
           </Card>
         ) : null}
 
@@ -181,9 +144,9 @@ export default function BookScreen() {
             <Text style={styles.noticeTitle}>Processing failed</Text>
             <Text style={styles.noticeText}>
               {book.status_message ??
-                'We could not extract text from this file. Scanned PDFs are not supported yet — try pasting the text instead.'}
+                'We could not extract text from this file. Scanned PDFs are not supported yet — try pasting the text instead.'}{' '}
+              Delete this book and upload it again, or paste the text instead.
             </Text>
-            <Button label="Retry processing" small onPress={() => void retryProcessing()} loading={busy} />
           </Card>
         ) : null}
 
