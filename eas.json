@@ -6,6 +6,9 @@
   "build": {
     "preview": {
       "distribution": "internal",
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://athena-api-w018.onrender.com"
+      },
       "android": {
         "buildType": "apk"
       }
