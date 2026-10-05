@@ -9,14 +9,15 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    Modal,
-    NativeScrollEvent,
-    NativeSyntheticEvent,
-    Platform,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
+  ActivityIndicator,
+  Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
   TextInput,
   View,
 } from 'react-native';
@@ -28,6 +29,8 @@ import {
   getReaderNotes,
   getReadingProgress,
   saveReadingProgress,
+  searchBook,
+  type BookSearchHit,
   type ReaderNote,
 } from '@/lib/api';
 import { api } from '@/lib/apiClient';
@@ -97,6 +100,10 @@ export default function ReaderScreen() {
   const [noteMode, setNoteMode] = useState<'highlight' | 'note'>('highlight');
   const [noteDraft, setNoteDraft] = useState('');
   const [savingNote, setSavingNote] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<BookSearchHit[] | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const scrollRef = useRef<ScrollView>(null);
   const pendingScrollRef = useRef<number | null>(null);
@@ -109,6 +116,9 @@ export default function ReaderScreen() {
   const lastSaveRef = useRef(0);
   const suppressScrollRef = useRef(false);
   const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingSearchRef = useRef<{ chapterId: string; needle: string } | null>(null);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchSeqRef = useRef(0);
 
   // Stop re-applying the saved position (user took over, or a new jump).
   const cancelSettle = () => {
@@ -187,6 +197,15 @@ export default function ReaderScreen() {
           `/api/chapters/${summary.id}`,
         );
         if (cancelled) return;
+        // A search result waiting for this chapter: land on its paragraph.
+        const pendingSearch = pendingSearchRef.current;
+        if (pendingSearch && pendingSearch.chapterId === data.id) {
+          pendingSearchRef.current = null;
+          const needle = pendingSearch.needle.toLowerCase();
+          const blocks = splitParagraphs(data.content);
+          const found = blocks.findIndex((block) => block.toLowerCase().includes(needle));
+          if (found >= 0) pendingParagraphRef.current = found;
+        }
         setChapter({
           id: data.id,
           title: data.title,
@@ -226,6 +245,7 @@ export default function ReaderScreen() {
     // Save the position when leaving the reader.
     return () => {
       if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+      if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
       flushProgress();
     };
   }, [flushProgress]);
@@ -356,6 +376,58 @@ export default function ReaderScreen() {
     await deleteReaderNote(noteId).catch(() => {});
   };
 
+  // ── in-book search ────────────────────────────────────────────────────────
+
+  const runSearch = async (text: string) => {
+    if (!bookId) return;
+    const seq = ++searchSeqRef.current;
+    setSearching(true);
+    try {
+      const results = await searchBook(bookId, text);
+      if (seq === searchSeqRef.current) setSearchResults(results);
+    } catch {
+      if (seq === searchSeqRef.current) setSearchResults([]);
+    } finally {
+      if (seq === searchSeqRef.current) setSearching(false);
+    }
+  };
+
+  const handleSearchText = (text: string) => {
+    setSearchQuery(text);
+    if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+    const trimmed = text.trim();
+    if (trimmed.length < 2) {
+      searchSeqRef.current += 1; // cancel anything in flight
+      setSearchResults(null);
+      setSearching(false);
+      return;
+    }
+    searchTimerRef.current = setTimeout(() => void runSearch(trimmed), 450);
+  };
+
+  const jumpToSearchHit = (hit: BookSearchHit) => {
+    const needle = searchQuery.trim().toLowerCase();
+    setSearchOpen(false);
+    if (!needle || !bookId) return;
+    const targetIndex = chapters.findIndex((entry) => entry.id === hit.chapter_id);
+    if (targetIndex < 0) return;
+    ratioRef.current = 0;
+    pendingScrollRef.current = null;
+    cancelSettle();
+    if (targetIndex === index && chapter?.id === hit.chapter_id) {
+      const blocks = splitParagraphs(chapter?.content ?? '');
+      const found = blocks.findIndex((block) => block.toLowerCase().includes(needle));
+      if (found >= 0) {
+        pendingParagraphRef.current = found;
+        tryJumpToParagraph();
+      }
+    } else {
+      flushProgress();
+      pendingSearchRef.current = { chapterId: hit.chapter_id, needle };
+      setIndex(targetIndex);
+    }
+  };
+
   // ── rendering ─────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -406,6 +478,9 @@ export default function ReaderScreen() {
           <Text style={[styles.topSubtitle, { color: theme.muted }]} numberOfLines={1}>
             {chapter?.title ?? `Chapter ${index + 1}`}
           </Text>
+        </Pressable>
+        <Pressable style={styles.iconButton} onPress={() => setSearchOpen(true)}>
+          <Ionicons name="search-outline" size={19} color={theme.text} />
         </Pressable>
         <Pressable style={styles.iconButton} onPress={() => setNotesOpen(true)}>
           <Ionicons name="bookmark-outline" size={19} color={theme.text} />
@@ -751,6 +826,57 @@ export default function ReaderScreen() {
         </View>
       </Modal>
 
+      {/* In-book search */}
+      <Modal visible={searchOpen} transparent animationType="slide" onRequestClose={() => setSearchOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setSearchOpen(false)} />
+        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+          <Text style={[styles.sheetTitle, { color: theme.text }]}>Search this book</Text>
+          <TextInput
+            value={searchQuery}
+            onChangeText={handleSearchText}
+            placeholder="Type at least 2 letters..."
+            placeholderTextColor={theme.muted}
+            autoFocus
+            autoCorrect={false}
+            style={[styles.noteInput, styles.searchInput, { color: theme.text, borderColor: theme.border }]}
+          />
+          {searching ? <ActivityIndicator color={theme.muted} style={{ paddingVertical: 14 }} /> : null}
+          {!searching && searchResults !== null ? (
+            searchResults.length === 0 ? (
+              <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
+                No matches for “{searchQuery.trim()}”.
+              </Text>
+            ) : (
+              <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
+                {searchResults.map((hit) => (
+                  <Pressable
+                    key={hit.chapter_id}
+                    style={[styles.noteRow, { borderColor: theme.border }]}
+                    onPress={() => jumpToSearchHit(hit)}
+                  >
+                    <View style={styles.flex}>
+                      <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>
+                        Ch. {hit.number} · {hit.title}
+                        {hit.hits > 1 ? ` · ${hit.hits} matches` : ''}
+                      </Text>
+                      <Text style={{ color: theme.text, marginTop: 4, lineHeight: 20 }} numberOfLines={2}>
+                        {hit.snippet.replace(/\s+/g, ' ').trim()}
+                      </Text>
+                    </View>
+                    <Ionicons name="arrow-forward" size={16} color={theme.muted} />
+                  </Pressable>
+                ))}
+              </ScrollView>
+            )
+          ) : null}
+          {!searching && searchResults === null ? (
+            <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
+              Find a word or phrase anywhere in the book — results jump straight to the passage.
+            </Text>
+          ) : null}
+        </View>
+      </Modal>
+
       {/* Notes & highlights drawer */}
       <Modal visible={notesOpen} transparent animationType="slide" onRequestClose={() => setNotesOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setNotesOpen(false)} />
@@ -949,4 +1075,5 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
   noteDelete: { padding: 8 },
+  searchInput: { minHeight: 46, paddingVertical: 10 },
 });

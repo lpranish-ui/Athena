@@ -1202,6 +1202,34 @@ app.delete('/api/notes/:id', async (req, res) => {
   }
 });
 
+// ── in-book search ────────────────────────────────────────────────────────────
+
+app.get('/api/books/:id/search', async (req, res) => {
+  try {
+    const book = await readableBook(req.params.id, req.user.id);
+    if (!book) throw new HttpError(404, 'Book not found.');
+
+    const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
+    if (q.length < 2) throw new HttpError(400, 'Type at least 2 characters to search.');
+
+    // position() avoids needing to escape LIKE wildcards in the query.
+    const rows = await many(
+      `select c.id as chapter_id, c.number, c.title,
+              position(lower($2) in lower(c.content)) as position,
+              ((length(c.content) - length(replace(lower(c.content), lower($2), ''))) / length($2))::int as hits,
+              substring(c.content from greatest(position(lower($2) in lower(c.content)) - 80, 1) for 220) as snippet
+         from chapters c
+        where c.book_id = $1 and position(lower($2) in lower(c.content)) > 0
+        order by c.number
+        limit 30`,
+      [req.params.id, q],
+    );
+    res.json({ query: q, results: rows });
+  } catch (error) {
+    handle(res, error, 'Could not search this book.');
+  }
+});
+
 // ── fallbacks ────────────────────────────────────────────────────────────────
 
 app.use('/api', (_req, res) => {

@@ -142,7 +142,8 @@ export default function BookScreen() {
             <Text style={styles.noticeTitle}>Still processing…</Text>
             <Text style={styles.noticeText}>
               This book has not finished being split into chapters yet. Reopen this screen in a
-              moment to check.
+              moment to check. If it stays stuck (for example the upload was interrupted), delete
+              this book below and upload it again.
             </Text>
             <Button label="Check again" small onPress={() => void load()} loading={busy} />
           </Card>

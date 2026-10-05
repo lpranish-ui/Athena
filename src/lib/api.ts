@@ -210,6 +210,24 @@ export async function deleteReaderNote(noteId: string): Promise<void> {
   await api.del(`/api/notes/${noteId}`);
 }
 
+/** One chapter that matched an in-book search for a word or phrase. */
+export interface BookSearchHit {
+  chapter_id: string;
+  number: number;
+  title: string;
+  position: number;
+  hits: number;
+  snippet: string;
+}
+
+/** Searches every chapter of one book; one row per matching chapter. */
+export async function searchBook(bookId: string, query: string): Promise<BookSearchHit[]> {
+  const result = await api.get<{ query: string; results: BookSearchHit[] }>(
+    `/api/books/${bookId}/search?q=${encodeURIComponent(query)}`,
+  );
+  return result.results;
+}
+
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
   try {
