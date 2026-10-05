@@ -95,7 +95,7 @@ async function startQuestion(roomId, index) {
   const now = Date.now();
   return one(
     `update group_rooms
-        set phase = 'question', current_index = $2,
+        set status = 'playing', phase = 'question', current_index = $2,
             question_started_at = $3, question_ends_at = $4, reveal_ends_at = null
       where id = $1 returning *`,
     [roomId, index, new Date(now).toISOString(), new Date(now + QUESTION_MS).toISOString()],

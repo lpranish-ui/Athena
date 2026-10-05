@@ -144,6 +144,19 @@ export default function QuizzesScreen() {
               </View>
               <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
             </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.reviewCard, pressed && styles.pressed]}
+              onPress={() => router.push('/group')}
+            >
+              <Ionicons name="people-outline" size={20} color={colors.accent} />
+              <View style={styles.reviewText}>
+                <Text style={styles.reviewTitle}>Group study</Text>
+                <Text style={styles.reviewMeta}>
+                  Quiz your friends live — same questions, fastest correct answers win
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+            </Pressable>
           </View>
         }
         ListEmptyComponent={
