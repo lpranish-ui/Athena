@@ -1,0 +1,70 @@
+# Builds a ready-to-install Android APK on GitHub's servers (free - no Expo account needed).
+#
+# Where to get the APK:
+#   Direct link (always the newest build):
+#     https://github.com/lpranish-ui/Athena/releases/download/apk-latest/app-release.apk
+#   Or: repo -> Actions -> "Build Android APK" -> latest run -> Artifacts.
+#
+# Runs automatically when app code changes on main, or manually from the
+# Actions tab (workflow_dispatch). First build takes ~15 min.
+#
+# The APK is signed with the default debug key, which is perfect for
+# installing directly on a phone. (A Play-Store release would need its own
+# keystore - add that later when publishing.)
+
+name: Build Android APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'assets/**'
+      - 'app.json'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    env:
+      EXPO_PUBLIC_API_URL: https://athena-api-w018.onrender.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate native Android project
+        run: npx expo prebuild --platform android --clean --no-install
+
+      - name: Build release APK
+        run: cd android && ./gradlew assembleRelease --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: athena-apk
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Publish rolling release (direct download link)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-latest
+          name: Athena APK (latest)
+          body: Built automatically from the latest main branch.
+          files: android/app/build/outputs/apk/release/app-release.apk
