@@ -72,8 +72,20 @@ export default function UploadScreen() {
       return;
     }
 
+    // Large medical textbooks often exceed the server limit — catch it here
+    // so nothing is half-created on the server.
+    const MAX_UPLOAD_MB = 80;
+    if (picked.size !== null && picked.size > MAX_UPLOAD_MB * 1024 * 1024) {
+      const sizeMb = (picked.size / (1024 * 1024)).toFixed(0);
+      setError(
+        `This file is ${sizeMb} MB — over the ${MAX_UPLOAD_MB} MB limit. Split the book into smaller PDFs (e.g. one per half) and upload those, or use “Paste text” for a chapter.`,
+      );
+      return;
+    }
+
     setBusy(true);
     setError(null);
+    let createdBookId: string | null = null;
     try {
       setStage('Creating book…');
       const book = await api.post<{ id: string }>('/api/books', {
@@ -82,13 +94,18 @@ export default function UploadScreen() {
         subject: subject.trim() || 'General',
         file_type: picked.fileType,
       });
+      createdBookId = book.id;
 
       setStage('Uploading and reading your book…');
       const result = await uploadBookFile(book.id, picked);
 
       router.replace({ pathname: '/book/[id]', params: { id: result.bookId } });
     } catch (err) {
-      // Duplicate / unreadable uploads are cleaned up by the server.
+      // Leave nothing behind on failure: remove the shell book row (the
+      // server already cleans up duplicates and unreadable files).
+      if (createdBookId) {
+        await api.del(`/api/books/${createdBookId}`).catch(() => {});
+      }
       setError(err instanceof Error ? err.message : 'Upload failed. Please try again.');
     } finally {
       setBusy(false);

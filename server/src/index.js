@@ -922,6 +922,11 @@ app.post(
         res.status(status).json({ error: error.message });
         return;
       }
+      // Safety net: never leave a book stuck in "processing".
+      await query(
+        "update books set status = 'error', status_message = $2 where id = $1 and status = 'processing'",
+        [bookId, (error instanceof Error ? error.message : 'Upload failed.').slice(0, 500)],
+      ).catch(() => {});
       handle(res, error, 'Could not process this book.');
     }
   },
@@ -934,10 +939,16 @@ app.use('/api', (_req, res) => {
 });
 
 // Body-parser errors (e.g. files above the 80 MB limit) become friendly JSON.
-app.use((error, _req, res, _next) => {
+app.use(async (error, req, res, _next) => {
   if (error?.type === 'entity.too.large') {
+    // Remove the shell book row so nothing stays stuck in "processing".
+    const bookId = req?.params?.bookId;
+    if (bookId) {
+      await query('delete from books where id = $1', [bookId]).catch(() => {});
+    }
     res.status(413).json({
-      error: 'This file is too large to process (max 80 MB). Try a smaller file, or import the text instead.',
+      error:
+        'This file is too large to process (max 80 MB). Split the book into smaller parts and upload those, or import the text instead.',
     });
     return;
   }
