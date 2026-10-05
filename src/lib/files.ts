@@ -149,7 +149,10 @@ export async function uploadBookFile(
       const chunk = await readChunk(picked, sent, end);
       // Send an exact-length ArrayBuffer — most compatible body type across
       // react-native and browser fetch implementations.
-      const body = chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength);
+      const body = chunk.buffer.slice(
+        chunk.byteOffset,
+        chunk.byteOffset + chunk.byteLength,
+      ) as ArrayBuffer;
       await apiRequest<{ received: number }>('PUT', `/api/uploads/${bookId}/chunk`, {
         raw: body,
         headers: { 'Content-Type': 'application/octet-stream' },

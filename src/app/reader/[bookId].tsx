@@ -78,6 +78,8 @@ export default function ReaderScreen() {
   const ratioRef = useRef(0);
   const chapterIdRef = useRef<string | null>(null);
   const lastSaveRef = useRef(0);
+  const suppressScrollRef = useRef(false);
+  const restoreUntilRef = useRef(0);
 
   const theme = READER_THEMES[settings.theme];
 
@@ -189,6 +191,17 @@ export default function ReaderScreen() {
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+
+    // Ignore the scroll events our own restore/jump triggers.
+    if (suppressScrollRef.current) {
+      suppressScrollRef.current = false;
+      return;
+    }
+
+    // A real user gesture takes over — stop re-applying the saved position.
+    pendingScrollRef.current = null;
+    restoreUntilRef.current = 0;
+
     const max = Math.max(1, contentSize.height - layoutMeasurement.height);
     ratioRef.current = Math.min(1, Math.max(0, contentOffset.y / max));
 
@@ -201,13 +214,23 @@ export default function ReaderScreen() {
     }
   };
 
+  // The chapter text is one huge block — browsers and native views report a
+  // final size only after a moment. Re-apply the pending position for a short
+  // settle window so the restore sticks; any real user scroll cancels it.
   const applyPendingScroll = () => {
     const pending = pendingScrollRef.current;
     if (pending === null) return;
     if (contentHeightRef.current <= 0 || layoutHeightRef.current <= 0) return;
+    if (restoreUntilRef.current === 0) restoreUntilRef.current = Date.now() + 1500;
+
     const max = Math.max(0, contentHeightRef.current - layoutHeightRef.current);
+    suppressScrollRef.current = true;
     scrollRef.current?.scrollTo({ y: pending * max, animated: false });
-    pendingScrollRef.current = null;
+
+    if (Date.now() >= restoreUntilRef.current) {
+      pendingScrollRef.current = null;
+      restoreUntilRef.current = 0;
+    }
   };
 
   const handleContentSize = (_width: number, height: number) => {
@@ -220,6 +243,7 @@ export default function ReaderScreen() {
     flushProgress();
     ratioRef.current = 0;
     pendingScrollRef.current = 0;
+    restoreUntilRef.current = 0;
     setChaptersOpen(false);
     setIndex(nextIndex);
     scrollRef.current?.scrollTo({ y: 0, animated: false });
