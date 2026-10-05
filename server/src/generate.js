@@ -100,6 +100,7 @@ async function verifyAnswers(questions, contexts, userId) {
       model: getVerifyModel(),
       temperature: 0,
       maxTokens: 2000,
+      timeoutMs: 30000, // verification is best-effort — never stall the request
       meta: { userId, purpose: 'verify_mcqs' },
       messages: [
         {
