@@ -1,3 +1,4 @@
+import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import {
@@ -10,7 +11,6 @@ import {
     Text,
     View,
 } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
 
 import { BookCard } from '@/components/BookCard';
 import { Screen } from '@/components/Screen';

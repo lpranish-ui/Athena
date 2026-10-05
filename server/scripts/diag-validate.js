@@ -6,13 +6,13 @@
 
 import { readFile } from 'node:fs/promises';
 import {
-  fixedChaptersSection,
-  normalizeForMatch,
-  parseQuestions,
-  requestSection,
-  SYSTEM_PROMPT,
-  validateQuestion,
-  withPageMarkers,
+    fixedChaptersSection,
+    normalizeForMatch,
+    parseQuestions,
+    requestSection,
+    SYSTEM_PROMPT,
+    validateQuestion,
+    withPageMarkers,
 } from '../src/questions.js';
 
 const base = 'https://athena-api-w018.onrender.com';

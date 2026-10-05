@@ -7,10 +7,10 @@
 
 import { readFile } from 'node:fs/promises';
 import {
-  fixedChaptersSection,
-  requestSection,
-  SYSTEM_PROMPT,
-  withPageMarkers,
+    fixedChaptersSection,
+    requestSection,
+    SYSTEM_PROMPT,
+    withPageMarkers,
 } from '../src/questions.js';
 
 const base = 'https://athena-api-w018.onrender.com';
