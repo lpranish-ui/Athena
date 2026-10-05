@@ -4,12 +4,15 @@
 // Postgres instance. See server/sql/schema.sql for the database.
 // ============================================================================
 
+import { readFile } from 'node:fs/promises';
+
 import cors from 'cors';
 import express from 'express';
 
 import { registerAuthRoutes, requireAuth } from './auth.js';
 import { many, one, query, withTransaction } from './db.js';
 import { generateMcqs, replaceQuestion } from './generate.js';
+import { registerGroupRoutes } from './group.js';
 import { HttpError } from './http.js';
 import { IngestError, ingestFile, ingestText } from './ingest.js';
 import { generateStudyKit } from './studykit.js';
@@ -41,6 +44,9 @@ app.use('/api', (req, res, next) => {
   }
   requireAuth(req, res, next);
 });
+
+// Multiplayer group-study routes (a signed-in user is required).
+registerGroupRoutes(app);
 
 /** Sends a thrown error with the right status and a `{ error }` body. */
 function handle(res, error, fallback) {
@@ -938,6 +944,16 @@ app.use((error, _req, res, _next) => {
   console.error('Unhandled error:', error?.message ?? error);
   res.status(500).json({ error: 'Unexpected server error.' });
 });
+
+// Keep the database schema up to date on every boot (every statement is
+// idempotent, so new tables roll out automatically with each deploy).
+try {
+  const schemaSql = await readFile(new URL('../sql/schema.sql', import.meta.url), 'utf8');
+  await query(schemaSql);
+  console.log('Database schema is up to date.');
+} catch (error) {
+  console.error('Schema bootstrap failed:', error instanceof Error ? error.message : error);
+}
 
 const port = Number(process.env.PORT) || 8787;
 app.listen(port, '0.0.0.0', () => {
