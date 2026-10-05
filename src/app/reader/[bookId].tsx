@@ -108,6 +108,8 @@ export default function ReaderScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const pendingScrollRef = useRef<number | null>(null);
   const pendingParagraphRef = useRef<number | null>(null);
+  const pendingParagraphChapterRef = useRef<string | null>(null);
+  const paragraphJumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const paragraphLayoutsRef = useRef<Map<number, number>>(new Map());
   const contentHeightRef = useRef(0);
   const layoutHeightRef = useRef(0);
@@ -126,6 +128,16 @@ export default function ReaderScreen() {
       clearTimeout(settleTimerRef.current);
       settleTimerRef.current = null;
     }
+  };
+
+  // Drop any pending jump-to-paragraph target.
+  const cancelParagraphJump = () => {
+    if (paragraphJumpTimerRef.current !== null) {
+      clearTimeout(paragraphJumpTimerRef.current);
+      paragraphJumpTimerRef.current = null;
+    }
+    pendingParagraphRef.current = null;
+    pendingParagraphChapterRef.current = null;
   };
 
   const theme = READER_THEMES[settings.theme];
@@ -204,7 +216,10 @@ export default function ReaderScreen() {
           const needle = pendingSearch.needle.toLowerCase();
           const blocks = splitParagraphs(data.content);
           const found = blocks.findIndex((block) => block.toLowerCase().includes(needle));
-          if (found >= 0) pendingParagraphRef.current = found;
+          if (found >= 0) {
+            pendingParagraphRef.current = found;
+            pendingParagraphChapterRef.current = data.id;
+          }
         }
         setChapter({
           id: data.id,
@@ -246,6 +261,7 @@ export default function ReaderScreen() {
     return () => {
       if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
       if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
+      if (paragraphJumpTimerRef.current !== null) clearTimeout(paragraphJumpTimerRef.current);
       flushProgress();
     };
   }, [flushProgress]);
@@ -261,6 +277,7 @@ export default function ReaderScreen() {
 
     // A real user gesture takes over — stop re-applying the saved position.
     cancelSettle();
+    cancelParagraphJump();
     pendingScrollRef.current = null;
 
     const max = Math.max(1, contentSize.height - layoutMeasurement.height);
@@ -308,6 +325,7 @@ export default function ReaderScreen() {
     ratioRef.current = 0;
     pendingScrollRef.current = 0;
     cancelSettle();
+    cancelParagraphJump();
     setChaptersOpen(false);
     setIndex(nextIndex);
     scrollRef.current?.scrollTo({ y: 0, animated: false });
@@ -318,11 +336,22 @@ export default function ReaderScreen() {
   const tryJumpToParagraph = () => {
     const target = pendingParagraphRef.current;
     if (target === null) return;
+    // The jump belongs to one chapter — ignore layouts of any other chapter.
+    const targetChapter = pendingParagraphChapterRef.current;
+    if (targetChapter !== null && targetChapter !== chapter?.id) return;
     const y = paragraphLayoutsRef.current.get(target);
     if (y === undefined) return;
     suppressScrollRef.current = true;
     scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: false });
-    pendingParagraphRef.current = null;
+    // Keep re-applying while the layout settles, then let go — a real user
+    // scroll (or another jump) cancels it first.
+    if (paragraphJumpTimerRef.current === null) {
+      paragraphJumpTimerRef.current = setTimeout(() => {
+        paragraphJumpTimerRef.current = null;
+        pendingParagraphRef.current = null;
+        pendingParagraphChapterRef.current = null;
+      }, 900);
+    }
   };
 
   const notesForParagraph = (paragraphIndex: number) =>
@@ -334,7 +363,9 @@ export default function ReaderScreen() {
     const target = chapters.findIndex((entry) => entry.id === note.chapter_id);
     setNotesOpen(false);
     if (target < 0) return;
+    cancelParagraphJump();
     pendingParagraphRef.current = note.paragraph_index;
+    pendingParagraphChapterRef.current = note.chapter_id;
     if (target !== index) {
       flushProgress();
       pendingScrollRef.current = null;
@@ -414,11 +445,13 @@ export default function ReaderScreen() {
     ratioRef.current = 0;
     pendingScrollRef.current = null;
     cancelSettle();
+    cancelParagraphJump();
     if (targetIndex === index && chapter?.id === hit.chapter_id) {
       const blocks = splitParagraphs(chapter?.content ?? '');
       const found = blocks.findIndex((block) => block.toLowerCase().includes(needle));
       if (found >= 0) {
         pendingParagraphRef.current = found;
+        pendingParagraphChapterRef.current = hit.chapter_id;
         tryJumpToParagraph();
       }
     } else {
