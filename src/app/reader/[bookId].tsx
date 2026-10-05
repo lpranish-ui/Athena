@@ -201,14 +201,18 @@ export default function ReaderScreen() {
     }
   };
 
+  const applyPendingScroll = () => {
+    const pending = pendingScrollRef.current;
+    if (pending === null) return;
+    if (contentHeightRef.current <= 0 || layoutHeightRef.current <= 0) return;
+    const max = Math.max(0, contentHeightRef.current - layoutHeightRef.current);
+    scrollRef.current?.scrollTo({ y: pending * max, animated: false });
+    pendingScrollRef.current = null;
+  };
+
   const handleContentSize = (_width: number, height: number) => {
     contentHeightRef.current = height;
-    const pending = pendingScrollRef.current;
-    if (pending !== null && layoutHeightRef.current > 0) {
-      const max = Math.max(0, height - layoutHeightRef.current);
-      scrollRef.current?.scrollTo({ y: pending * max, animated: false });
-      pendingScrollRef.current = null;
-    }
+    applyPendingScroll();
   };
 
   const jumpToChapter = (nextIndex: number) => {
@@ -287,6 +291,7 @@ export default function ReaderScreen() {
         onContentSizeChange={handleContentSize}
         onLayout={(event) => {
           layoutHeightRef.current = event.nativeEvent.layout.height;
+          applyPendingScroll();
         }}
         showsVerticalScrollIndicator={false}
       >
