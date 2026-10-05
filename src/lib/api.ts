@@ -168,6 +168,48 @@ export async function getReadingList(): Promise<ReadingListItem[]> {
   }
 }
 
+// ── highlights & notes ──────────────────────────────────────────────────────
+
+export interface ReaderNote {
+  id: string;
+  chapter_id: string;
+  paragraph_index: number;
+  kind: 'highlight' | 'note';
+  text: string;
+  note: string | null;
+  created_at?: string;
+  chapter_number?: number;
+  chapter_title?: string;
+}
+
+/** All highlights + notes the student saved in one book. */
+export async function getReaderNotes(bookId: string): Promise<ReaderNote[]> {
+  try {
+    return await api.get<ReaderNote[]>(`/api/books/${bookId}/notes`);
+  } catch {
+    return [];
+  }
+}
+
+/** Saves a highlight (or a note attached to a passage). */
+export async function addReaderNote(
+  bookId: string,
+  input: {
+    chapterId: string;
+    paragraphIndex: number;
+    kind: 'highlight' | 'note';
+    text: string;
+    note?: string;
+  },
+): Promise<ReaderNote> {
+  return api.post<ReaderNote>(`/api/books/${bookId}/notes`, input);
+}
+
+/** Removes a highlight/note. */
+export async function deleteReaderNote(noteId: string): Promise<void> {
+  await api.del(`/api/notes/${noteId}`);
+}
+
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
   try {

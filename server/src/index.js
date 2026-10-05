@@ -1133,6 +1133,75 @@ app.put('/api/books/:id/reading-progress', async (req, res) => {
   }
 });
 
+// ── highlights & notes ────────────────────────────────────────────────────────
+
+app.get('/api/books/:id/notes', async (req, res) => {
+  try {
+    const book = await readableBook(req.params.id, req.user.id);
+    if (!book) throw new HttpError(404, 'Book not found.');
+    const rows = await many(
+      `select n.id, n.chapter_id, n.paragraph_index, n.kind, n.text, n.note, n.created_at,
+              c.number as chapter_number, c.title as chapter_title
+         from reader_notes n
+         join chapters c on c.id = n.chapter_id
+        where n.user_id = $1 and n.book_id = $2
+        order by c.number, n.paragraph_index`,
+      [req.user.id, req.params.id],
+    );
+    res.json(rows);
+  } catch (error) {
+    handle(res, error, 'Could not load your notes.');
+  }
+});
+
+app.post('/api/books/:id/notes', async (req, res) => {
+  try {
+    const book = await readableBook(req.params.id, req.user.id);
+    if (!book) throw new HttpError(404, 'Book not found.');
+
+    const chapterId = typeof req.body?.chapterId === 'string' ? req.body.chapterId : '';
+    const paragraphIndex = Number(req.body?.paragraphIndex);
+    const kind = req.body?.kind === 'note' ? 'note' : 'highlight';
+    const text = String(req.body?.text ?? '').slice(0, 2000).trim();
+    const note = typeof req.body?.note === 'string' ? req.body.note.slice(0, 2000).trim() : null;
+
+    if (!chapterId || !Number.isInteger(paragraphIndex) || paragraphIndex < 0) {
+      throw new HttpError(400, 'Missing highlight position.');
+    }
+    if (!text && !note) throw new HttpError(400, 'Nothing to save.');
+
+    const chapter = await one('select id from chapters where id = $1 and book_id = $2', [
+      chapterId,
+      req.params.id,
+    ]);
+    if (!chapter) throw new HttpError(400, 'That chapter does not belong to this book.');
+
+    const row = await one(
+      `insert into reader_notes (user_id, book_id, chapter_id, paragraph_index, kind, text, note)
+       values ($1, $2, $3, $4, $5, $6, $7)
+       returning id, chapter_id, paragraph_index, kind, text, note, created_at`,
+      [req.user.id, req.params.id, chapterId, paragraphIndex, kind, text, note],
+    );
+    res.status(201).json(row);
+  } catch (error) {
+    handle(res, error, 'Could not save that.');
+  }
+});
+
+app.delete('/api/notes/:id', async (req, res) => {
+  try {
+    const row = await one('select id from reader_notes where id = $1 and user_id = $2', [
+      req.params.id,
+      req.user.id,
+    ]);
+    if (!row) throw new HttpError(404, 'Not found.');
+    await query('delete from reader_notes where id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (error) {
+    handle(res, error, 'Could not delete that.');
+  }
+});
+
 // ── fallbacks ────────────────────────────────────────────────────────────────
 
 app.use('/api', (_req, res) => {

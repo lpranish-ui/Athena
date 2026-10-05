@@ -17,11 +17,19 @@ import {
     ScrollView,
     StyleSheet,
     Text,
-    View,
+  TextInput,
+  View,
 } from 'react-native';
 
 import { LoadingView } from '@/components/ui';
-import { getReadingProgress, saveReadingProgress } from '@/lib/api';
+import {
+  addReaderNote,
+  deleteReaderNote,
+  getReaderNotes,
+  getReadingProgress,
+  saveReadingProgress,
+  type ReaderNote,
+} from '@/lib/api';
 import { api } from '@/lib/apiClient';
 import { spacing } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';
@@ -38,6 +46,17 @@ const READER_THEMES: Record<ThemeName, { bg: string; text: string; muted: string
 
 type Spacing = 'cozy' | 'normal' | 'airy';
 const LINE_HEIGHTS: Record<Spacing, number> = { cozy: 1.4, normal: 1.65, airy: 1.9 };
+
+/** Soft gold tint behind highlighted passages, per theme. */
+const HIGHLIGHT_TINTS: Record<ThemeName, string> = {
+  dark: 'rgba(216,154,40,0.22)',
+  sepia: 'rgba(216,154,40,0.30)',
+  light: 'rgba(216,154,40,0.20)',
+};
+
+// Clock read kept at module scope — it runs from scroll callbacks, never
+// during render, but the React compiler's purity rule is conservative.
+const nowMs: () => number = Date.now.bind(Date);
 
 interface ReaderSettings {
   theme: ThemeName;
@@ -70,16 +89,34 @@ export default function ReaderScreen() {
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chaptersOpen, setChaptersOpen] = useState(false);
+  const [notes, setNotes] = useState<ReaderNote[]>([]);
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [actionTarget, setActionTarget] = useState<{ paragraphIndex: number; text: string } | null>(
+    null,
+  );
+  const [noteMode, setNoteMode] = useState<'highlight' | 'note'>('highlight');
+  const [noteDraft, setNoteDraft] = useState('');
+  const [savingNote, setSavingNote] = useState(false);
 
   const scrollRef = useRef<ScrollView>(null);
   const pendingScrollRef = useRef<number | null>(null);
+  const pendingParagraphRef = useRef<number | null>(null);
+  const paragraphLayoutsRef = useRef<Map<number, number>>(new Map());
   const contentHeightRef = useRef(0);
   const layoutHeightRef = useRef(0);
   const ratioRef = useRef(0);
   const chapterIdRef = useRef<string | null>(null);
   const lastSaveRef = useRef(0);
   const suppressScrollRef = useRef(false);
-  const restoreUntilRef = useRef(0);
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Stop re-applying the saved position (user took over, or a new jump).
+  const cancelSettle = () => {
+    if (settleTimerRef.current !== null) {
+      clearTimeout(settleTimerRef.current);
+      settleTimerRef.current = null;
+    }
+  };
 
   const theme = READER_THEMES[settings.theme];
 
@@ -89,12 +126,15 @@ export default function ReaderScreen() {
     if (!bookId) return;
     void (async () => {
       try {
-        const [bookData, chaptersData, progress, settingsRaw] = await Promise.all([
+        const [bookData, chaptersData, progress, settingsRaw, notesData] = await Promise.all([
           api.get<Book>(`/api/books/${bookId}`),
           api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`),
           getReadingProgress(bookId),
           AsyncStorage.getItem(SETTINGS_KEY),
+          getReaderNotes(bookId),
         ]);
+
+        setNotes(notesData);
 
         if (settingsRaw) {
           try {
@@ -135,13 +175,13 @@ export default function ReaderScreen() {
 
   useEffect(() => {
     const summary = chapters[index];
-    if (!summary) {
-      if (!loading && chapters.length === 0) setError('This book has no chapters yet.');
-      return;
-    }
+    if (!summary) return;
+    if (chapter?.id === summary.id) return; // already on screen — do not refetch
     let cancelled = false;
-    setLoadingChapter(true);
+    paragraphLayoutsRef.current = new Map();
     void (async () => {
+      if (cancelled) return;
+      setLoadingChapter(true);
       try {
         const data = await api.get<ChapterContent & { content: string }>(
           `/api/chapters/${summary.id}`,
@@ -167,7 +207,7 @@ export default function ReaderScreen() {
     return () => {
       cancelled = true;
     };
-  }, [chapters, index, loading]);
+  }, [chapters, index, chapter?.id]);
 
   // ── persist settings ──────────────────────────────────────────────────────
 
@@ -185,6 +225,7 @@ export default function ReaderScreen() {
   useEffect(() => {
     // Save the position when leaving the reader.
     return () => {
+      if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
       flushProgress();
     };
   }, [flushProgress]);
@@ -199,13 +240,13 @@ export default function ReaderScreen() {
     }
 
     // A real user gesture takes over — stop re-applying the saved position.
+    cancelSettle();
     pendingScrollRef.current = null;
-    restoreUntilRef.current = 0;
 
     const max = Math.max(1, contentSize.height - layoutMeasurement.height);
     ratioRef.current = Math.min(1, Math.max(0, contentOffset.y / max));
 
-    const now = Date.now();
+    const now = nowMs();
     if (now - lastSaveRef.current > 2500) {
       lastSaveRef.current = now;
       if (bookId && chapterIdRef.current) {
@@ -221,15 +262,18 @@ export default function ReaderScreen() {
     const pending = pendingScrollRef.current;
     if (pending === null) return;
     if (contentHeightRef.current <= 0 || layoutHeightRef.current <= 0) return;
-    if (restoreUntilRef.current === 0) restoreUntilRef.current = Date.now() + 1500;
 
     const max = Math.max(0, contentHeightRef.current - layoutHeightRef.current);
     suppressScrollRef.current = true;
     scrollRef.current?.scrollTo({ y: pending * max, animated: false });
 
-    if (Date.now() >= restoreUntilRef.current) {
-      pendingScrollRef.current = null;
-      restoreUntilRef.current = 0;
+    // Keep re-applying while the layout settles, then let go — unless the
+    // user scrolls first, which cancels the timer in handleScroll.
+    if (settleTimerRef.current === null) {
+      settleTimerRef.current = setTimeout(() => {
+        settleTimerRef.current = null;
+        pendingScrollRef.current = null;
+      }, 1500);
     }
   };
 
@@ -243,10 +287,69 @@ export default function ReaderScreen() {
     flushProgress();
     ratioRef.current = 0;
     pendingScrollRef.current = 0;
-    restoreUntilRef.current = 0;
+    cancelSettle();
     setChaptersOpen(false);
     setIndex(nextIndex);
     scrollRef.current?.scrollTo({ y: 0, animated: false });
+  };
+
+  // ── highlights & notes ────────────────────────────────────────────────────
+
+  const tryJumpToParagraph = () => {
+    const target = pendingParagraphRef.current;
+    if (target === null) return;
+    const y = paragraphLayoutsRef.current.get(target);
+    if (y === undefined) return;
+    suppressScrollRef.current = true;
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: false });
+    pendingParagraphRef.current = null;
+  };
+
+  const notesForParagraph = (paragraphIndex: number) =>
+    notes.filter(
+      (entry) => entry.chapter_id === chapter?.id && entry.paragraph_index === paragraphIndex,
+    );
+
+  const jumpToNote = (note: ReaderNote) => {
+    const target = chapters.findIndex((entry) => entry.id === note.chapter_id);
+    setNotesOpen(false);
+    if (target < 0) return;
+    pendingParagraphRef.current = note.paragraph_index;
+    if (target !== index) {
+      flushProgress();
+      pendingScrollRef.current = null;
+      cancelSettle();
+      setIndex(target);
+    } else {
+      tryJumpToParagraph();
+    }
+  };
+
+  const saveNote = async (kind: 'highlight' | 'note') => {
+    if (!actionTarget || !chapter || !bookId) return;
+    if (kind === 'note' && !noteDraft.trim()) return;
+    setSavingNote(true);
+    try {
+      const saved = await addReaderNote(bookId, {
+        chapterId: chapter.id,
+        paragraphIndex: actionTarget.paragraphIndex,
+        kind,
+        text: actionTarget.text.slice(0, 2000),
+        ...(kind === 'note' ? { note: noteDraft.trim() } : {}),
+      });
+      setNotes((current) => [...current, saved]);
+      setActionTarget(null);
+      setNoteDraft('');
+    } catch {
+      // Keep the sheet open so the student can retry.
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  const removeNote = async (noteId: string) => {
+    setNotes((current) => current.filter((entry) => entry.id !== noteId));
+    await deleteReaderNote(noteId).catch(() => {});
   };
 
   // ── rendering ─────────────────────────────────────────────────────────────
@@ -300,6 +403,14 @@ export default function ReaderScreen() {
             {chapter?.title ?? `Chapter ${index + 1}`}
           </Text>
         </Pressable>
+        <Pressable style={styles.iconButton} onPress={() => setNotesOpen(true)}>
+          <Ionicons name="bookmark-outline" size={19} color={theme.text} />
+          {notes.length > 0 ? (
+            <View style={styles.notesBadge}>
+              <Text style={styles.notesBadgeText}>{notes.length > 99 ? '99+' : notes.length}</Text>
+            </View>
+          ) : null}
+        </Pressable>
         <Pressable style={styles.iconButton} onPress={() => setSettingsOpen(true)}>
           <Ionicons name="text" size={20} color={theme.text} />
         </Pressable>
@@ -333,21 +444,44 @@ export default function ReaderScreen() {
             >
               {chapter?.title ?? `Chapter ${index + 1}`}
             </Text>
-            {paragraphs.map((paragraph, paragraphIndex) => (
-              <Text
-                key={paragraphIndex}
-                selectable
-                style={{
-                  color: theme.text,
-                  fontFamily: serifFamily,
-                  fontSize: settings.fontSize,
-                  lineHeight,
-                  marginBottom: Math.round(lineHeight * 0.55),
-                }}
-              >
-                {paragraph}
-              </Text>
-            ))}
+            {paragraphs.map((paragraph, paragraphIndex) => {
+              const marks = notesForParagraph(paragraphIndex);
+              const highlighted = marks.some((entry) => entry.kind === 'highlight');
+              const noted = marks.some((entry) => entry.kind === 'note');
+              return (
+                <Pressable
+                  key={paragraphIndex}
+                  onLongPress={() => {
+                    setActionTarget({ paragraphIndex, text: paragraph });
+                    setNoteMode('highlight');
+                    setNoteDraft('');
+                  }}
+                  delayLongPress={350}
+                  onLayout={(event) => {
+                    paragraphLayoutsRef.current.set(paragraphIndex, event.nativeEvent.layout.y);
+                    tryJumpToParagraph();
+                  }}
+                  style={
+                    highlighted
+                      ? [styles.highlightedParagraph, { backgroundColor: HIGHLIGHT_TINTS[settings.theme] }]
+                      : undefined
+                  }
+                >
+                  <Text
+                    style={{
+                      color: theme.text,
+                      fontFamily: serifFamily,
+                      fontSize: settings.fontSize,
+                      lineHeight,
+                      marginBottom: Math.round(lineHeight * 0.55),
+                    }}
+                  >
+                    {paragraph}
+                    {noted ? '  📝' : ''}
+                  </Text>
+                </Pressable>
+              );
+            })}
 
             <View style={[styles.chapterEnd, { borderColor: theme.border }]}>
               <Text style={{ color: theme.muted, marginBottom: spacing.md }}>
@@ -537,6 +671,129 @@ export default function ReaderScreen() {
           </ScrollView>
         </View>
       </Modal>
+
+      {/* Passage actions (long-press) */}
+      <Modal
+        visible={actionTarget !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setActionTarget(null)}
+      >
+        <Pressable style={styles.modalBackdrop} onPress={() => setActionTarget(null)} />
+        <View style={[styles.sheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+          <Text style={[styles.sheetTitle, { color: theme.text }]}>
+            {noteMode === 'note' ? 'Add a note' : 'Save this passage'}
+          </Text>
+          <Text
+            style={[styles.passagePreview, { color: theme.muted, borderColor: theme.border }]}
+            numberOfLines={4}
+          >
+            {actionTarget?.text.slice(0, 260) ?? ''}
+          </Text>
+          {noteMode === 'note' ? (
+            <TextInput
+              value={noteDraft}
+              onChangeText={setNoteDraft}
+              placeholder="Write your note…"
+              placeholderTextColor={theme.muted}
+              multiline
+              autoFocus
+              style={[styles.noteInput, { color: theme.text, borderColor: theme.border }]}
+            />
+          ) : null}
+          <View style={styles.settingRow}>
+            {noteMode !== 'note' ? (
+              <>
+                <Pressable
+                  style={[
+                    styles.choiceChip,
+                    { borderColor: '#D2921F', backgroundColor: 'rgba(210,146,31,0.18)' },
+                  ]}
+                  disabled={savingNote}
+                  onPress={() => void saveNote('highlight')}
+                >
+                  <Text style={{ color: theme.text, fontWeight: '700' }}>📍 Highlight</Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.choiceChip, { borderColor: theme.border }]}
+                  onPress={() => setNoteMode('note')}
+                >
+                  <Text style={{ color: theme.text, fontWeight: '600' }}>📝 Add a note</Text>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Pressable
+                  style={[
+                    styles.choiceChip,
+                    { borderColor: '#6D8BFF', backgroundColor: 'rgba(109,139,255,0.16)' },
+                  ]}
+                  disabled={savingNote || !noteDraft.trim()}
+                  onPress={() => void saveNote('note')}
+                >
+                  <Text style={{ color: theme.text, fontWeight: '700' }}>
+                    {savingNote ? 'Saving…' : 'Save note'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  style={[styles.choiceChip, { borderColor: theme.border }]}
+                  onPress={() => setNoteMode('highlight')}
+                >
+                  <Text style={{ color: theme.muted, fontWeight: '600' }}>Back</Text>
+                </Pressable>
+              </>
+            )}
+          </View>
+        </View>
+      </Modal>
+
+      {/* Notes & highlights drawer */}
+      <Modal visible={notesOpen} transparent animationType="slide" onRequestClose={() => setNotesOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setNotesOpen(false)} />
+        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+          <Text style={[styles.sheetTitle, { color: theme.text }]}>
+            Notes & highlights{notes.length > 0 ? ` (${notes.length})` : ''}
+          </Text>
+          {notes.length === 0 ? (
+            <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
+              Long-press any passage while reading to highlight it or attach a note.
+            </Text>
+          ) : (
+            <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
+              {notes.map((entry) => (
+                <View key={entry.id} style={[styles.noteRow, { borderColor: theme.border }]}>
+                  <Pressable style={styles.flex} onPress={() => jumpToNote(entry)}>
+                    <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>
+                      Ch. {entry.chapter_number} · {entry.chapter_title}
+                    </Text>
+                    {entry.kind === 'note' && entry.note ? (
+                      <Text style={{ color: theme.text, marginTop: 4, lineHeight: 20 }}>
+                        {entry.note}
+                      </Text>
+                    ) : null}
+                    {entry.text ? (
+                      <Text
+                        style={{
+                          color: entry.kind === 'highlight' ? theme.text : theme.muted,
+                          marginTop: 4,
+                          fontStyle: 'italic',
+                          lineHeight: 20,
+                        }}
+                        numberOfLines={entry.kind === 'highlight' ? 4 : 3}
+                      >
+                        “{entry.text}”
+                      </Text>
+                    ) : null}
+                  </Pressable>
+                  <Pressable onPress={() => void removeNote(entry.id)} style={styles.noteDelete}>
+                    <Ionicons name="trash-outline" size={16} color={theme.muted} />
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -646,4 +903,46 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  notesBadge: {
+    position: 'absolute',
+    top: 2,
+    right: 6,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#D2921F',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 3,
+  },
+  notesBadgeText: { color: '#1A1206', fontSize: 10, fontWeight: '800' },
+  highlightedParagraph: {
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    marginHorizontal: -8,
+    paddingTop: 4,
+    marginTop: -4,
+  },
+  passagePreview: {
+    fontStyle: 'italic',
+    lineHeight: 22,
+    borderLeftWidth: 3,
+    paddingLeft: 10,
+    marginBottom: 4,
+  },
+  noteInput: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    minHeight: 90,
+    fontSize: 15,
+    textAlignVertical: 'top',
+  },
+  noteRow: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingVertical: 12,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+  },
+  noteDelete: { padding: 8 },
 });

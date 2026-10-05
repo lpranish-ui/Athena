@@ -308,3 +308,20 @@ create table if not exists reading_progress (
 );
 
 create index if not exists reading_progress_user_idx on reading_progress (user_id, updated_at desc);
+
+-- ----------------------------------------------------------------------------
+-- reader_notes: highlights + personal notes saved while reading
+-- ----------------------------------------------------------------------------
+create table if not exists reader_notes (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users (id) on delete cascade,
+  book_id uuid not null references books (id) on delete cascade,
+  chapter_id uuid not null references chapters (id) on delete cascade,
+  paragraph_index int not null,
+  kind text not null check (kind in ('highlight', 'note')),
+  text text not null default '',
+  note text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists reader_notes_book_idx on reader_notes (user_id, book_id, created_at desc);
