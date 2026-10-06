@@ -177,6 +177,7 @@ export interface ReaderNote {
   kind: 'highlight' | 'note';
   text: string;
   note: string | null;
+  color?: string | null;
   created_at?: string;
   chapter_number?: number;
   chapter_title?: string;
@@ -200,6 +201,7 @@ export async function addReaderNote(
     kind: 'highlight' | 'note';
     text: string;
     note?: string;
+    color?: string;
   },
 ): Promise<ReaderNote> {
   return api.post<ReaderNote>(`/api/books/${bookId}/notes`, input);
@@ -244,6 +246,21 @@ export interface BookAnswer {
 /** Asks a question about one book; the answer is built only from its text. */
 export async function askBook(bookId: string, question: string): Promise<BookAnswer> {
   return api.post<BookAnswer>(`/api/books/${bookId}/ask`, { question });
+}
+
+/** One saved item across the whole library (for the "My notes" screen). */
+export interface LibraryNote extends ReaderNote {
+  book_id: string;
+  book_title: string;
+}
+
+/** Every highlight/note the student has saved, newest first. */
+export async function getAllNotes(): Promise<LibraryNote[]> {
+  try {
+    return await api.get<LibraryNote[]>('/api/notes');
+  } catch {
+    return [];
+  }
 }
 
 /** Deletes the signed-in user's account and all of their data. */

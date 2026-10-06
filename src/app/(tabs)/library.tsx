@@ -93,7 +93,16 @@ export default function LibraryScreen() {
                   {books.length} {books.length === 1 ? 'book' : 'books'} · your uploads are private
                 </Text>
               </View>
-              <Button label="Add book" icon="add" small onPress={() => router.push('/upload')} />
+              <View style={styles.titleActions}>
+                <Pressable
+                  style={styles.notesLink}
+                  onPress={() => router.push('/notes')}
+                  accessibilityLabel="My notes"
+                >
+                  <Ionicons name="bookmarks-outline" size={18} color={colors.primary} />
+                </Pressable>
+                <Button label="Add book" icon="add" small onPress={() => router.push('/upload')} />
+              </View>
             </View>
             {reading.length > 0 ? (
               <View style={styles.shelf}>
@@ -224,6 +233,19 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     justifyContent: 'space-between',
     gap: 12,
+  },
+  titleActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  notesLink: {
+    width: 34,
+    height: 34,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: withAlpha(colors.primary, '1F'),
   },
   titleText: {
     flex: 1,

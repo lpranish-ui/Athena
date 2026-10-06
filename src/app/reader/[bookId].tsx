@@ -35,6 +35,8 @@ import {
   type BookSearchHit,
   type ReaderNote,
 } from '@/lib/api';
+import { exportNotesMarkdown } from '@/lib/exportNotes';
+import { HIGHLIGHT_COLOR_KEYS, HIGHLIGHT_DOTS, type HighlightColor } from '@/lib/highlight-colors';
 import { api } from '@/lib/apiClient';
 import { spacing } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';
@@ -52,11 +54,12 @@ const READER_THEMES: Record<ThemeName, { bg: string; text: string; muted: string
 type Spacing = 'cozy' | 'normal' | 'airy';
 const LINE_HEIGHTS: Record<Spacing, number> = { cozy: 1.4, normal: 1.65, airy: 1.9 };
 
-/** Soft gold tint behind highlighted passages, per theme. */
-const HIGHLIGHT_TINTS: Record<ThemeName, string> = {
-  dark: 'rgba(216,154,40,0.22)',
-  sepia: 'rgba(216,154,40,0.30)',
-  light: 'rgba(216,154,40,0.20)',
+/** Per-color, per-theme tint behind highlighted passages. */
+const HIGHLIGHT_TINTS: Record<HighlightColor, Record<ThemeName, string>> = {
+  gold: { dark: 'rgba(216,154,40,0.22)', sepia: 'rgba(216,154,40,0.30)', light: 'rgba(216,154,40,0.20)' },
+  blue: { dark: 'rgba(109,139,255,0.20)', sepia: 'rgba(96,125,239,0.22)', light: 'rgba(96,125,239,0.14)' },
+  green: { dark: 'rgba(52,199,123,0.18)', sepia: 'rgba(52,199,123,0.20)', light: 'rgba(52,199,123,0.14)' },
+  pink: { dark: 'rgba(232,120,170,0.20)', sepia: 'rgba(232,120,170,0.22)', light: 'rgba(232,120,170,0.15)' },
 };
 
 // Clock read kept at module scope — it runs from scroll callbacks, never
@@ -81,7 +84,11 @@ interface ChapterContent {
 }
 
 export default function ReaderScreen() {
-  const { bookId } = useLocalSearchParams<{ bookId: string }>();
+  const { bookId, jumpChapter, jumpParagraph } = useLocalSearchParams<{
+    bookId: string;
+    jumpChapter?: string;
+    jumpParagraph?: string;
+  }>();
   const router = useRouter();
 
   const [book, setBook] = useState<Book | null>(null);
@@ -111,6 +118,7 @@ export default function ReaderScreen() {
   const [askAnswer, setAskAnswer] = useState<BookAnswer | null>(null);
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
+  const [noteColor, setNoteColor] = useState<HighlightColor>('gold');
 
   const scrollRef = useRef<ScrollView>(null);
   const pendingScrollRef = useRef<number | null>(null);
@@ -231,14 +239,29 @@ export default function ReaderScreen() {
           const found = chaptersData.findIndex((entry) => entry.id === progress.chapter_id);
           if (found >= 0) startIndex = found;
         }
-        pendingScrollRef.current = progress?.offset_ratio ?? 0;
+        // Deep link from the notes screens: open on a specific passage.
+        if (jumpChapter) {
+          const found = chaptersData.findIndex((entry) => entry.id === jumpChapter);
+          if (found >= 0) {
+            startIndex = found;
+            pendingParagraphChapterRef.current = jumpChapter;
+            const paragraph = Number(jumpParagraph);
+            if (Number.isInteger(paragraph) && paragraph >= 0) {
+              pendingParagraphRef.current = paragraph;
+            }
+          }
+        }
+        pendingScrollRef.current =
+          jumpChapter && pendingParagraphRef.current !== null
+            ? null
+            : (progress?.offset_ratio ?? 0);
         setIndex(startIndex);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not open this book.');
         setLoading(false);
       }
     })();
-  }, [bookId]);
+  }, [bookId, jumpChapter, jumpParagraph]);
 
   // ── load the current chapter's text ───────────────────────────────────────
 
@@ -390,6 +413,13 @@ export default function ReaderScreen() {
       (entry) => entry.chapter_id === chapter?.id && entry.paragraph_index === paragraphIndex,
     );
 
+  const tintForParagraph = (marksList: ReaderNote[]) => {
+    const key = marksList[0]?.color ?? 'gold';
+    const palette =
+      (HIGHLIGHT_TINTS as Record<string, Record<ThemeName, string>>)[key] ?? HIGHLIGHT_TINTS.gold;
+    return palette[settings.theme];
+  };
+
   const jumpToNote = (note: ReaderNote) => {
     const target = chapters.findIndex((entry) => entry.id === note.chapter_id);
     setNotesOpen(false);
@@ -416,6 +446,7 @@ export default function ReaderScreen() {
         chapterId: chapter.id,
         paragraphIndex: actionTarget.paragraphIndex,
         kind,
+        color: noteColor,
         text: actionTarget.text.slice(0, 2000),
         ...(kind === 'note' ? { note: noteDraft.trim() } : {}),
       });
@@ -622,6 +653,7 @@ export default function ReaderScreen() {
                     setActionTarget({ paragraphIndex, text: paragraph });
                     setNoteMode('highlight');
                     setNoteDraft('');
+                    setNoteColor('gold');
                   }}
                   delayLongPress={350}
                   onLayout={(event) => {
@@ -630,7 +662,7 @@ export default function ReaderScreen() {
                   }}
                   style={
                     highlighted
-                      ? [styles.highlightedParagraph, { backgroundColor: HIGHLIGHT_TINTS[settings.theme] }]
+                      ? [styles.highlightedParagraph, { backgroundColor: tintForParagraph(marks) }]
                       : undefined
                   }
                 >
@@ -857,6 +889,19 @@ export default function ReaderScreen() {
           >
             {actionTarget?.text.slice(0, 260) ?? ''}
           </Text>
+          <View style={styles.colorRow}>
+            {HIGHLIGHT_COLOR_KEYS.map((key) => (
+              <Pressable
+                key={key}
+                onPress={() => setNoteColor(key)}
+                style={[
+                  styles.colorDot,
+                  { backgroundColor: HIGHLIGHT_DOTS[key] },
+                  noteColor === key && { borderColor: theme.text, borderWidth: 2 },
+                ]}
+              />
+            ))}
+          </View>
           {noteMode === 'note' ? (
             <TextInput
               value={noteDraft}
@@ -1057,9 +1102,19 @@ export default function ReaderScreen() {
       <Modal visible={notesOpen} transparent animationType="slide" onRequestClose={() => setNotesOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setNotesOpen(false)} />
         <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
-          <Text style={[styles.sheetTitle, { color: theme.text }]}>
-            Notes & highlights{notes.length > 0 ? ` (${notes.length})` : ''}
-          </Text>
+          <View style={styles.drawerHeader}>
+            <Text style={[styles.sheetTitle, { color: theme.text }]}>
+              Notes & highlights{notes.length > 0 ? ` (${notes.length})` : ''}
+            </Text>
+            {notes.length > 0 ? (
+              <Pressable
+                style={styles.noteDelete}
+                onPress={() => void exportNotesMarkdown(book.title, notes)}
+              >
+                <Ionicons name="share-outline" size={18} color={theme.muted} />
+              </Pressable>
+            ) : null}
+          </View>
           {notes.length === 0 ? (
             <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
               Long-press any passage while reading to highlight it or attach a note.
@@ -1069,9 +1124,21 @@ export default function ReaderScreen() {
               {notes.map((entry) => (
                 <View key={entry.id} style={[styles.noteRow, { borderColor: theme.border }]}>
                   <Pressable style={styles.flex} onPress={() => jumpToNote(entry)}>
-                    <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>
-                      Ch. {entry.chapter_number} · {entry.chapter_title}
-                    </Text>
+                    <View style={styles.noteMetaRow}>
+                      <View
+                        style={[
+                          styles.noteDot,
+                          {
+                            backgroundColor:
+                              HIGHLIGHT_DOTS[(entry.color ?? 'gold') as HighlightColor] ??
+                              HIGHLIGHT_DOTS.gold,
+                          },
+                        ]}
+                      />
+                      <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>
+                        Ch. {entry.chapter_number} · {entry.chapter_title}
+                      </Text>
+                    </View>
                     {entry.kind === 'note' && entry.note ? (
                       <Text style={{ color: theme.text, marginTop: 4, lineHeight: 20 }}>
                         {entry.note}
@@ -1257,4 +1324,9 @@ const styles = StyleSheet.create({
   modeChipActive: { borderColor: '#6D8BFF', backgroundColor: 'rgba(109,139,255,0.16)' },
   sourceRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 10, gap: 6 },
   sourceChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1 },
+  colorRow: { flexDirection: 'row', gap: 12, paddingVertical: 2 },
+  colorDot: { width: 26, height: 26, borderRadius: 13, borderWidth: 2, borderColor: 'transparent' },
+  drawerHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  noteMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  noteDot: { width: 8, height: 8, borderRadius: 4 },
 });

@@ -325,3 +325,6 @@ create table if not exists reader_notes (
 );
 
 create index if not exists reader_notes_book_idx on reader_notes (user_id, book_id, created_at desc);
+
+-- Highlight colors (gold default; older rows keep gold automatically).
+alter table reader_notes add column if not exists color text not null default 'gold';
