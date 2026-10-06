@@ -48,5 +48,6 @@ example
 tc*.txt
 lint*.txt
 slog.txt
-perf.txt
+perf*.txt
 bootlog.txt
+
