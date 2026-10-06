@@ -44,7 +44,7 @@ export default function RootLayout() {
 }
 
 function RootNavigator() {
-  const { loading } = useAuth();
+  const { loading, session } = useAuth();
 
   useEffect(() => {
     if (!loading) {
@@ -68,7 +68,10 @@ function RootNavigator() {
       }}
     >
       <Stack.Screen name="index" />
+      <Stack.Protected guard={!session}>
       <Stack.Screen name="(auth)" />
+      </Stack.Protected>
+      <Stack.Protected guard={!!session}>
       <Stack.Screen name="(tabs)" />
       <Stack.Screen
         name="upload"
@@ -89,6 +92,8 @@ function RootNavigator() {
       <Stack.Screen name="group" options={{ ...headerOptions, title: 'Group study' }} />
       <Stack.Screen name="group/[code]" options={{ ...headerOptions, title: 'Group game' }} />
       <Stack.Screen name="reader/[bookId]" options={{ headerShown: false }} />
+      <Stack.Screen name="notes" options={{ ...headerOptions, title: 'Highlights & notes' }} />
+      </Stack.Protected>
     </Stack>
   );
 }

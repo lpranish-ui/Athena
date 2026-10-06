@@ -7,6 +7,7 @@ import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
+import { LoadError } from '@/components/LoadError';
 import { Badge, Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { api } from '@/lib/apiClient';
 import { scheduleReview } from '@/lib/review';
@@ -97,6 +98,15 @@ export default function ReviewScreen() {
 
   if (loading) {
     return <LoadingView label="Loading your review queue…" />;
+  }
+
+  if (error && queue.length === 0) {
+    return (
+      <Screen>
+        <Stack.Screen options={{ title: 'Smart review' }} />
+        <LoadError message={error} onRetry={() => { setLoading(true); void load(); }} />
+      </Screen>
+    );
   }
 
   if (queue.length === 0) {

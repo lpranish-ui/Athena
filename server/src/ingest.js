@@ -17,13 +17,13 @@
 
 import { spawn } from 'node:child_process';
 import { createReadStream } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, unlink } from 'node:fs/promises';
 
 import { strFromU8, unzipSync } from 'fflate';
 import crypto from 'node:crypto';
 import { getDocument } from 'pdfjs-dist/legacy/build/pdf.mjs';
 
-import { one, query } from './db.js';
+import { one, query, withTransaction } from './db.js';
 
 // pdf.js uses Promise.withResolvers (ES2024) — polyfill for older Node.
 if (typeof Promise.withResolvers !== 'function') {
@@ -97,9 +97,9 @@ function flattenOutline(items) {
   return out;
 }
 
-async function extractPdf(bytes) {
+export async function extractPdf(bytes) {
   const doc = await getDocument({
-    data: bytes,
+    data: bytes instanceof Buffer ? new Uint8Array(bytes) : bytes,
     isEvalSupported: false,
     useSystemFonts: true,
     disableFontFace: true,
@@ -224,17 +224,28 @@ function stripHtml(html) {
     .trim();
 }
 
-function extractEpubText(bytes) {
-  const files = unzipSync(bytes);
-
-  const containerBytes = files['META-INF/container.xml'];
+export function extractEpubText(bytes) {
+  // EPUBs commonly contain large images. Inflate only metadata and spine text,
+  // and reject oversized text entries before allocating decompression buffers.
+  const selectedFiles = (names) => {
+    let total = 0;
+    return unzipSync(bytes, { filter: (file) => {
+      if (!names.has(file.name)) return false;
+      total += file.originalSize;
+      if (total > 32 * 1024 * 1024) throw new IngestError('The EPUB text is too large. Split it into smaller volumes.');
+      return true;
+    } });
+  };
+  const containerBytes = selectedFiles(new Set(['META-INF/container.xml']))['META-INF/container.xml'];
   if (!containerBytes) throw new IngestError('Not a valid EPUB (missing META-INF/container.xml).');
   const container = strFromU8(containerBytes);
   const rootfileTag = firstMatch(container, /<rootfile\b[^>]*>/i);
   const opfPath = rootfileTag ? attribute(rootfileTag, 'full-path') : null;
-  if (!opfPath || !files[opfPath]) throw new IngestError('Not a valid EPUB (missing package document).');
+  if (!opfPath) throw new IngestError('Not a valid EPUB (missing package document).');
+  const packageBytes = selectedFiles(new Set([opfPath]))[opfPath];
+  if (!packageBytes) throw new IngestError('Not a valid EPUB (missing package document).');
 
-  const opf = strFromU8(files[opfPath]);
+  const opf = strFromU8(packageBytes);
   const baseDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
 
   const manifest = new Map();
@@ -250,6 +261,7 @@ function extractEpubText(bytes) {
     if (idref && manifest.has(idref)) spine.push(manifest.get(idref));
   }
 
+  const files = selectedFiles(new Set(spine.map((href) => resolvePath(baseDir, href))));
   const sections = [];
   for (const href of spine) {
     const path = resolvePath(baseDir, href);
@@ -337,7 +349,8 @@ function buildDraftsFromStarts(lines, starts) {
   if (maxPage === 0) return null;
 
   const drafts = [];
-  for (let i = 0; i < starts.length && i < MAX_CHAPTERS; i++) {
+  starts = starts.slice(0, MAX_CHAPTERS);
+  for (let i = 0; i < starts.length; i++) {
     const from = i === 0 ? 1 : starts[i].page; // front matter joins the first chapter
     const to = i + 1 < starts.length ? starts[i + 1].page - 1 : maxPage;
     const segment = lines.filter((line) => line.page !== null && line.page >= from && line.page <= to);
@@ -346,7 +359,7 @@ function buildDraftsFromStarts(lines, starts) {
   }
 
   const usable = drafts.filter((draft) => draft.content.length >= MIN_TEXT_LENGTH);
-  return usable.length >= 2 ? usable : null;
+  return usable.length >= 2 ? drafts : null;
 }
 
 /** Builds chapters from the PDF's bookmarks when the outline is usable. */
@@ -458,7 +471,7 @@ function chaptersFromToc(lines) {
   return buildDraftsFromStarts(lines, unique);
 }
 
-function splitIntoChapters(lines, outline) {
+export function splitIntoChapters(lines, outline = []) {
   const fromOutline = chaptersFromOutline(lines, outline);
   if (fromOutline) return fromOutline;
 
@@ -486,7 +499,9 @@ function splitIntoChapters(lines, outline) {
   if (candidates.length >= 2 && candidates.length <= 60) {
     const segments = [];
     for (let i = 0; i < candidates.length && segments.length < MAX_CHAPTERS; i++) {
-      const start = candidates[i].lineIndex + 1;
+      // Keep front matter and heading text: chapter detection must not discard
+      // source material from the reader or from subsequent AI prompts.
+      const start = i === 0 ? 0 : candidates[i].lineIndex;
       const end = i + 1 < candidates.length ? candidates[i + 1].lineIndex : lines.length;
       segments.push(toChapterDraft(candidates[i].title, lines.slice(start, end)));
     }
@@ -496,14 +511,19 @@ function splitIntoChapters(lines, outline) {
     for (const segment of segments) {
       const previous = merged[merged.length - 1];
       if (previous && segment.content.length < 300) {
-        previous.content = `${previous.content}\n${segment.title}\n${segment.content}`.trim();
+        const offset = previous.content.length + 1;
+        previous.content += `\n${segment.content}`;
+        previous.pageMap.push(...segment.pageMap.map((mark) => ({
+          ...mark, char_start: offset + mark.char_start,
+        })));
+        previous.lastPage = segment.lastPage ?? previous.lastPage;
       } else {
         merged.push(segment);
       }
     }
 
     const usable = merged.filter((segment) => segment.content.length >= MIN_TEXT_LENGTH);
-    if (usable.length >= 2) return usable;
+    if (usable.length >= 2) return merged.filter((segment) => segment.content.length > 0);
   }
 
   return chunkFallback(lines);
@@ -511,7 +531,7 @@ function splitIntoChapters(lines, outline) {
 
 // ── persistence ──────────────────────────────────────────────────────────────
 
-async function insertChapters(bookId, chapters) {
+async function insertChapters(bookId, chapters, execute = query) {
   let inserted = 0;
 
   for (let i = 0; i < chapters.length; i += CHAPTER_BATCH_SIZE) {
@@ -536,7 +556,7 @@ async function insertChapters(bookId, chapters) {
       );
     });
 
-    await query(
+    await execute(
       `insert into chapters (book_id, number, title, content, first_page, last_page, page_map)
        values ${placeholders.join(', ')}`,
       params,
@@ -547,17 +567,11 @@ async function insertChapters(bookId, chapters) {
   return inserted;
 }
 
-async function finalizeBook(bookId, lines, outline) {
-  let usable = lines;
-
+async function finalizeBook(bookId, lines, outline, fileHash = null) {
+  const usable = lines;
   const totalChars = usable.reduce((sum, line) => sum + line.text.length + 1, 0);
   if (totalChars > MAX_TOTAL_CHARS) {
-    // Truncate at the line level to keep page maps valid.
-    let accumulated = 0;
-    usable = usable.filter((line) => {
-      accumulated += line.text.length + 1;
-      return accumulated <= MAX_TOTAL_CHARS;
-    });
+    throw new IngestError('This book exceeds the extracted-text limit. Split it into smaller volumes and upload each volume.');
   }
 
   const chapters = splitIntoChapters(usable, outline);
@@ -565,8 +579,23 @@ async function finalizeBook(bookId, lines, outline) {
     throw new IngestError('No readable text was found in this book.');
   }
 
-  const inserted = await insertChapters(bookId, chapters);
-  return inserted;
+  return withTransaction(async (client) => {
+    const locked = await client.query('select id, status, file_hash from books where id = $1 for update', [bookId]);
+    if (!locked.rows[0]) throw new IngestError('Book not found.');
+    // A worker can die after committing ingestion but before completing its
+    // job. Replaying that job must retain existing chapter IDs and quiz data.
+    if (fileHash && locked.rows[0].status === 'ready' && locked.rows[0].file_hash === fileHash) {
+      const existing = await client.query('select count(*)::int as count from chapters where book_id = $1', [bookId]);
+      if (existing.rows[0].count > 0) return existing.rows[0].count;
+    }
+    await client.query('delete from chapters where book_id = $1', [bookId]);
+    const inserted = await insertChapters(bookId, chapters, client.query.bind(client));
+    await client.query(
+      "update books set status = 'ready', status_message = null, file_hash = coalesce($2, file_hash) where id = $1",
+      [bookId, fileHash],
+    );
+    return inserted;
+  });
 }
 
 // ── poppler (pdftotext) extraction — low memory, any file size ───────────────
@@ -599,6 +628,7 @@ function runPoppler(filePath) {
   return new Promise((resolve, reject) => {
     const child = spawn('pdftotext', ['-enc', 'UTF-8', filePath, '-'], {
       stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 120000,
     });
     const chunks = [];
     let captured = 0;
@@ -606,19 +636,21 @@ function runPoppler(filePath) {
     child.stdout.on('data', (chunk) => {
       captured += chunk.length;
       if (captured <= 64 * 1024 * 1024) chunks.push(chunk);
+      else child.kill();
     });
     child.stderr.on('data', (chunk) => {
-      stderr += String(chunk).slice(0, 400);
+      stderr = (stderr + String(chunk)).slice(0, 1200);
     });
     child.on('error', reject);
     child.on('close', (code) => {
-      if (code === 0) resolve(Buffer.concat(chunks).toString('utf8'));
+      if (captured > 64 * 1024 * 1024) reject(new IngestError('The extracted PDF text is too large. Split the book into smaller volumes.'));
+      else if (code === 0) resolve(Buffer.concat(chunks).toString('utf8'));
       else reject(new IngestError(`Could not read this PDF (pdftotext exit ${code}). ${stderr}`.trim()));
     });
   });
 }
 
-async function extractPdfFile(filePath) {
+export async function extractPdfFile(filePath) {
   if (await hasPoppler()) {
     const text = await runPoppler(filePath);
     const lines = [];
@@ -635,6 +667,30 @@ async function extractPdfFile(filePath) {
   // Local-dev fallback: pdf.js (whole file in memory — fine for small books).
   const bytes = await readFile(filePath);
   return extractPdf(bytes);
+}
+
+/** OCR is optional. Install OCRmyPDF/Tesseract on the API host to enable scans. */
+async function extractScannedPdf(filePath) {
+  const outputPath = `${filePath}.${crypto.randomUUID()}.ocr.pdf`;
+  try {
+    await new Promise((resolve, reject) => {
+      const child = spawn('ocrmypdf', [
+        '--skip-text', '--optimize', '0', '--output-type', 'pdf',
+        '-l', process.env.OCR_LANG || 'eng', filePath, outputPath,
+      ], { stdio: ['ignore', 'ignore', 'pipe'], timeout: 10 * 60 * 1000 });
+      let details = '';
+      child.stderr.on('data', (chunk) => { details = (details + String(chunk)).slice(-500); });
+      child.on('error', (error) => reject(new IngestError(error.code === 'ENOENT'
+        ? 'This PDF needs OCR. The server does not have OCRmyPDF installed; upload a searchable PDF or ask an admin to enable OCR.'
+        : `OCR could not start: ${error.message}`)));
+      child.on('close', (code) => code === 0 ? resolve() : reject(new IngestError(
+        `OCR could not read this scan${code === null ? ' within the time limit' : ''}. ${details.trim()}`,
+      )));
+    });
+    return await extractPdfFile(outputPath);
+  } finally {
+    await unlink(outputPath).catch(() => {});
+  }
 }
 
 function hashFile(filePath) {
@@ -660,7 +716,7 @@ function linesFromPlainText(text) {
  * the temp file afterwards.
  */
 export async function ingestFileFromPath({ userId, bookId, filePath, fileType, onProgress }) {
-  const book = await one('select id, owner_id, file_type, title from books where id = $1', [bookId]);
+  const book = await one('select id, owner_id, file_type, title, status, file_hash from books where id = $1', [bookId]);
   if (!book) throw new IngestError('Book not found.');
   if (book.owner_id !== userId) throw new IngestError('You can only process your own uploads.');
 
@@ -669,6 +725,10 @@ export async function ingestFileFromPath({ userId, bookId, filePath, fileType, o
 
   try {
     const fileHash = await hashFile(filePath);
+    if (book.status === 'ready' && book.file_hash === fileHash) {
+      const existing = await one('select count(*)::int as count from chapters where book_id = $1', [bookId]);
+      if (existing.count > 0) return { bookId, chapters: existing.count };
+    }
 
     // Duplicate detection: same owner + same file fingerprint.
     const duplicate = await one(
@@ -690,12 +750,14 @@ export async function ingestFileFromPath({ userId, bookId, filePath, fileType, o
       lines = extracted.lines;
       outline = extracted.outline;
 
-      const textLength = lines.reduce((sum, line) => sum + line.text.length, 0);
-      if (textLength < 500) {
-        throw new IngestError(
-          'This PDF is a scan — it has no searchable text layer, so Athena cannot read it yet. ' +
-            'Scanned-book OCR is coming later; for now please upload a text-based PDF, EPUB or TXT.',
-        );
+      let textLength = lines.reduce((sum, line) => sum + line.text.length, 0);
+      if (textLength < MIN_TEXT_LENGTH) {
+        await onProgress?.('Reading scanned pages with OCR…');
+        const extracted = await extractScannedPdf(filePath);
+        lines = extracted.lines;
+        outline = extracted.outline;
+        textLength = lines.reduce((sum, line) => sum + line.text.length, 0);
+        if (textLength < MIN_TEXT_LENGTH) throw new IngestError('No readable text was found in this PDF after OCR.');
       }
     } else if (kind === 'epub') {
       lines = linesFromPlainText(extractEpubText(await readFile(filePath)));
@@ -704,11 +766,7 @@ export async function ingestFileFromPath({ userId, bookId, filePath, fileType, o
     }
 
     await onProgress?.('Detecting chapters…');
-    const chapters = await finalizeBook(bookId, lines, outline);
-    await query(
-      "update books set status = 'ready', status_message = null, file_hash = $2 where id = $1",
-      [bookId, fileHash],
-    );
+    const chapters = await finalizeBook(bookId, lines, outline, fileHash);
     return { bookId, chapters };
   } catch (error) {
     const message =
@@ -717,7 +775,7 @@ export async function ingestFileFromPath({ userId, bookId, filePath, fileType, o
       "update books set status = 'error', status_message = $2 where id = $1",
       [bookId, message.slice(0, 500)],
     ).catch(() => {});
-    throw error instanceof IngestError ? error : new IngestError(message);
+    throw error;
   }
 }
 
@@ -749,7 +807,7 @@ export async function ingestText({ userId, title, subject, author, text }) {
 
   const book = await one(
     `insert into books (title, subject, author, owner_id, is_default, status, file_hash)
-     values ($1, $2, $3, $4, false, 'ready', $5) returning id`,
+      values ($1, $2, $3, $4, false, 'processing', $5) returning id`,
     [cleanTitle, cleanSubject, cleanAuthor, userId, fileHash],
   );
   if (!book) throw new IngestError('Could not create the book. Please try again.');
@@ -760,8 +818,7 @@ export async function ingestText({ userId, title, subject, author, text }) {
       .map((line) => ({ text: line.trim(), page: null }))
       .filter((line) => line.text.length > 0);
 
-    const chapters = await finalizeBook(book.id, lines, []);
-    await query('update books set status = $2, status_message = null where id = $1', [book.id, 'ready']);
+    const chapters = await finalizeBook(book.id, lines, [], fileHash);
     return { bookId: book.id, chapters };
   } catch (error) {
     // The book was created in this call — remove the shell row so the
@@ -806,7 +863,7 @@ export async function ingestFile({ userId, bookId, bytes, fileType }) {
       outline = extracted.outline;
 
       const textLength = lines.reduce((sum, line) => sum + line.text.length, 0);
-      if (textLength < 500) {
+      if (textLength < MIN_TEXT_LENGTH) {
         // Scanned PDF: OCR is not available on this server yet.
         throw new IngestError(
           'This PDF is a scan — it has no searchable text layer, so Athena cannot read it yet. ' +
@@ -828,11 +885,7 @@ export async function ingestFile({ userId, bookId, bytes, fileType }) {
         .filter((line) => line.text.length > 0);
     }
 
-    const chapters = await finalizeBook(bookId, lines, outline);
-    await query(
-      "update books set status = 'ready', status_message = null, file_hash = $2 where id = $1",
-      [bookId, fileHash],
-    );
+    const chapters = await finalizeBook(bookId, lines, outline, fileHash);
 
     return { bookId, chapters };
   } catch (error) {
@@ -845,6 +898,6 @@ export async function ingestFile({ userId, bookId, bytes, fileType }) {
       [bookId, message.slice(0, 500)],
     ).catch(() => {});
 
-    throw error instanceof IngestError ? error : new IngestError(message);
+    throw error;
   }
 }

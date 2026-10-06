@@ -2,14 +2,15 @@
 // and stateless HMAC-SHA256 tokens (the JWT format, without any dependency).
 
 import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 
-import { one, query } from './db.js';
+import * as defaultDatabase from './db.js';
 
 const JWT_SECRET = process.env.JWT_SECRET ?? '';
 const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 60; // 60 days — students stay signed in
 
-if (!JWT_SECRET) {
-  console.error('JWT_SECRET is missing — sign-in tokens cannot be created.');
+export function assertAuthConfigured() {
+  if (!JWT_SECRET.trim()) throw new Error('JWT_SECRET must be configured before starting the API.');
 }
 
 // ── tokens ───────────────────────────────────────────────────────────────────
@@ -19,6 +20,7 @@ function base64url(input) {
 }
 
 export function signToken(userId) {
+  assertAuthConfigured();
   const now = Math.floor(Date.now() / 1000);
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const body = base64url(JSON.stringify({ sub: userId, iat: now, exp: now + TOKEN_TTL_SECONDS }));
@@ -28,8 +30,11 @@ export function signToken(userId) {
 }
 
 export function verifyToken(token) {
+  if (!JWT_SECRET.trim()) return null;
   try {
-    const [header, body, signature] = String(token).split('.');
+    const parts=String(token).split('.');
+    if (parts.length!==3) return null;
+    const [header, body, signature]=parts;
     if (!header || !body || !signature) return null;
 
     const expected = crypto.createHmac('sha256', JWT_SECRET).update(`${header}.${body}`).digest('base64url');
@@ -49,18 +54,19 @@ export function verifyToken(token) {
 // ── passwords (scrypt, Node built-in — no native dependencies) ──────────────
 
 const SCRYPT_PARAMS = { N: 16384, r: 8, p: 1 };
+const scrypt = promisify(crypto.scrypt);
 
-export function hashPassword(password) {
+export async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 32, SCRYPT_PARAMS).toString('hex');
+  const derived = (await scrypt(password, salt, 32, SCRYPT_PARAMS)).toString('hex');
   return `scrypt:${salt}:${derived}`;
 }
 
-export function verifyPassword(password, stored) {
+export async function verifyPassword(password, stored) {
   try {
     const [scheme, salt, hash] = String(stored).split(':');
     if (scheme !== 'scrypt' || !salt || !hash) return false;
-    const derived = crypto.scryptSync(password, salt, 32, SCRYPT_PARAMS);
+    const derived = await scrypt(password, salt, 32, SCRYPT_PARAMS);
     const expected = Buffer.from(hash, 'hex');
     return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
   } catch {
@@ -91,9 +97,43 @@ function normalizeEmail(value) {
   return String(value ?? '').trim().toLowerCase();
 }
 
-export function registerAuthRoutes(app) {
-  app.post('/api/auth/signup', async (req, res) => {
+export function createAuthLimiter({maxAttempts=60,maxAccountAttempts=15,maxConcurrent=16,windowMs=15*60*1000,now=Date.now}={}) {
+  const attempts=new Map();
+  let active=0;
+  return (req,res,next)=> {
+    const time=now();
+    for(const [key,value] of attempts) if(value.until<=time) attempts.delete(key);
+    const ip=req.ip ?? req.socket?.remoteAddress ?? 'unknown';
+    const keys=[['ip:'+ip,maxAttempts],['account:'+normalizeEmail(req.body?.email),maxAccountAttempts]];
+    if(active>=maxConcurrent || keys.some(([key,max])=>(attempts.get(key)?.count ?? 0)>=max)) {
+      res.set('Retry-After',active>=maxConcurrent?'5':String(Math.ceil(windowMs/1000)));
+      res.status(429).json({error:'Too many sign-in attempts. Please try again later.'});
+      return;
+    }
+    for(const [key] of keys) {
+      const entry=attempts.get(key) ?? {count:0,until:time+windowMs};
+      entry.count++; attempts.set(key,entry);
+    }
+    active++;
+    let released=false;
+    const release=()=> { if(!released) {released=true;active=Math.max(0,active-1);} };
+    // A disconnected client does not cancel scrypt or database work. Retain
+    // the slot until the handler ends its response, including a closed socket.
+    const end=res.end;
+    res.end=function (...args) {
+      try { return end.apply(this,args); }
+      finally { release(); }
+    };
+    res.once('finish',release);
+    next();
+  };
+}
+
+export function registerAuthRoutes(app, { database=defaultDatabase, limiter=createAuthLimiter() }={}) {
+  const {one,query,withTransaction}=database;
+  app.post('/api/auth/signup', limiter, async (req, res) => {
     try {
+      assertAuthConfigured();
       const email = normalizeEmail(req.body?.email);
       const password = String(req.body?.password ?? '');
       const fullName = String(req.body?.full_name ?? '').trim() || null;
@@ -102,8 +142,8 @@ export function registerAuthRoutes(app) {
         res.status(400).json({ error: 'Please enter a valid email address.' });
         return;
       }
-      if (password.length < 6) {
-        res.status(400).json({ error: 'The password must be at least 6 characters.' });
+      if (password.length < 6 || password.length > 1024) {
+        res.status(400).json({ error: 'The password must be between 6 and 1024 characters.' });
         return;
       }
 
@@ -113,20 +153,13 @@ export function registerAuthRoutes(app) {
         return;
       }
 
-      const created = await one(
-        'insert into users (email, password_hash) values ($1, $2) returning id, email',
-        [email, hashPassword(password)],
-      );
-      if (!created) {
-        res.status(500).json({ error: 'Could not create your account. Please try again.' });
-        return;
-      }
-
-      await query(
-        `insert into profiles (id, full_name) values ($1, $2)
-         on conflict (id) do update set full_name = coalesce(excluded.full_name, profiles.full_name)`,
-        [created.id, fullName],
-      );
+      const passwordHash=await hashPassword(password);
+      const created=await withTransaction(async (client)=> {
+        const user=(await client.query('insert into users(email,password_hash) values ($1,$2) returning id,email',
+          [email,passwordHash])).rows[0];
+        await client.query('insert into profiles(id,full_name) values ($1,$2)',[user.id,fullName]);
+        return user;
+      });
 
       res.status(201).json({
         token: signToken(created.id),
@@ -143,16 +176,17 @@ export function registerAuthRoutes(app) {
     }
   });
 
-  app.post('/api/auth/signin', async (req, res) => {
+  app.post('/api/auth/signin', limiter, async (req, res) => {
     try {
+      assertAuthConfigured();
       const email = normalizeEmail(req.body?.email);
       const password = String(req.body?.password ?? '');
-
+      if(password.length>1024) {res.status(400).json({error:'The password is too long.'});return;}
       const user = await one(
         'select id, email, password_hash from users where lower(email) = $1',
         [email],
       );
-      if (!user || !verifyPassword(password, user.password_hash)) {
+      if (!user || !(await verifyPassword(password, user.password_hash))) {
         res.status(401).json({ error: 'Incorrect email or password.' });
         return;
       }
@@ -164,23 +198,27 @@ export function registerAuthRoutes(app) {
     }
   });
 
-  app.post('/api/auth/refresh', requireAuth, async (req, res) => {
-    const user = await one('select id, email from users where id = $1', [req.user.id]);
-    if (!user) {
-      res.status(401).json({ error: 'This account no longer exists.' });
-      return;
+  app.post('/api/auth/refresh', requireAuth, async (req,res)=> {
+    try {
+      const user=await one('select id,email from users where id=$1',[req.user.id]);
+      if(!user) {res.status(401).json({error:'This account no longer exists.'});return;}
+      res.json({token:signToken(user.id),user:{id:user.id,email:user.email}});
+    } catch(error) {
+      console.error('token refresh failed:',error?.message ?? error);
+      res.status(503).json({error:'Could not refresh your session. Please try again.'});
     }
-    res.json({ token: signToken(user.id), user: { id: user.id, email: user.email } });
   });
 
-  app.get('/api/me', requireAuth, async (req, res) => {
-    const user = await one('select id, email from users where id = $1', [req.user.id]);
-    if (!user) {
-      res.status(401).json({ error: 'This account no longer exists.' });
-      return;
+  app.get('/api/me', requireAuth, async (req,res)=> {
+    try {
+      const user=await one('select id,email from users where id=$1',[req.user.id]);
+      if(!user) {res.status(401).json({error:'This account no longer exists.'});return;}
+      const profile=await one('select * from profiles where id=$1',[user.id]);
+      res.json({user:{id:user.id,email:user.email},profile});
+    } catch(error) {
+      console.error('session lookup failed:',error?.message ?? error);
+      res.status(503).json({error:'Could not load your session. Please try again.'});
     }
-    const profile = await one('select * from profiles where id = $1', [user.id]);
-    res.json({ user: { id: user.id, email: user.email }, profile });
   });
 
   // Saves the study profile (name, school, exam target + date, …).

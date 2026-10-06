@@ -263,6 +263,75 @@ export async function getAllNotes(): Promise<LibraryNote[]> {
   }
 }
 
+// ── flashcard decks (spaced repetition) ─────────────────────────────────────
+
+/** One book's deck with due counts, for the deck list. */
+export interface FlashcardDeck {
+  book_id: string;
+  book_title: string;
+  total: number;
+  due: number;
+  next_due: string | null;
+}
+
+/** A saved flashcard with its current review state. */
+export interface DeckCard {
+  id: string;
+  book_id: string;
+  chapter_id: string | null;
+  front: string;
+  back: string;
+  topic: string | null;
+  stability: number;
+  difficulty: number;
+  reps: number;
+  lapses: number;
+  due_at: string;
+  last_reviewed_at: string | null;
+}
+
+/** All of the student's decks (one per book with saved cards). */
+export async function getDecks(): Promise<FlashcardDeck[]> {
+  try {
+    return await api.get<FlashcardDeck[]>('/api/decks');
+  } catch {
+    return [];
+  }
+}
+
+/** Every card in one deck, due first. */
+export async function getDeckCards(bookId: string): Promise<DeckCard[]> {
+  return api.get<DeckCard[]>(`/api/decks/${bookId}/cards`);
+}
+
+/** Saves generated cards into the book's review deck (dedupes on front). */
+export async function saveFlashcards(
+  chapterId: string,
+  cards: { front: string; back: string; topic?: string }[],
+): Promise<{ saved: number }> {
+  return api.post<{ saved: number }>('/api/flashcards', { chapterId, cards });
+}
+
+/** Stores the computed schedule after grading a card. */
+export async function gradeCard(
+  cardId: string,
+  state: {
+    stability: number;
+    difficulty: number;
+    reps: number;
+    lapses: number;
+    due_at: string;
+    last_reviewed_at: string;
+  },
+): Promise<void> {
+  await api.patch(`/api/flashcards/${cardId}`, state);
+}
+
+/** Removes one card from the deck. */
+export async function deleteCard(cardId: string): Promise<void> {
+  await api.del(`/api/flashcards/${cardId}`);
+}
+
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
   try {

@@ -43,7 +43,15 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:server": "npm --prefix server test",
+    "audit:dependencies": "node scripts/audit-dependencies.cjs",
+    "postinstall": "node scripts/patch-dependencies.cjs"
+  },
+  "overrides": {
+    "decode-uri-component": "0.5.0",
+    "uuid": "11.1.1"
   },
   "private": true
 }

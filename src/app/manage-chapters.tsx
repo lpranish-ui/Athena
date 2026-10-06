@@ -84,13 +84,6 @@ export default function ManageChaptersScreen() {
     ]);
   };
 
-  /** Renumbers all chapters of the book to 1..n in current display order. */
-  const renumber = async () => {
-    if (!bookId) return;
-    const rows = await api.get<{ id: string }[]>(`/api/books/${bookId}/chapters`);
-    await api.post('/api/chapters/renumber', { book_id: bookId, ids: rows.map((row) => row.id) });
-  };
-
   // ── rename ──────────────────────────────────────────────────────────────────
 
   const rename = async (chapterId: string) => {
@@ -130,8 +123,6 @@ export default function ManageChaptersScreen() {
       const marks = validMarks(row.page_map);
 
       let cut = -1;
-      let tailFirstPage: number | null = null;
-
       const requested = Number.parseInt(pageInput, 10);
       if (marks.length > 0 && Number.isFinite(requested)) {
         const mark = marks.find((m) => m.page === requested && m.char_start > 0);
@@ -144,7 +135,6 @@ export default function ManageChaptersScreen() {
           );
         }
         cut = mark.char_start;
-        tailFirstPage = requested;
       } else {
         // No page data (pasted text / EPUB): split near the middle at a paragraph break.
         const middle = Math.floor(row.content.length / 2);
@@ -156,40 +146,8 @@ export default function ManageChaptersScreen() {
         throw new Error('This chapter is too small to split.');
       }
 
-      const head = row.content.slice(0, cut).trimEnd();
-      const tailRaw = row.content.slice(cut);
-      const tail = tailRaw.trimStart();
-      const leading = tailRaw.length - tail.length;
-
-      const headMarks = marks.filter((m) => m.char_start < cut);
-      const tailMarks =
-        marks.length > 0
-          ? marks
-              .filter((m) => m.char_start >= cut)
-              .map((m) => ({ page: m.page, char_start: m.char_start - cut - leading }))
-              .filter((m) => m.char_start >= 0)
-          : [];
-      const headLastPage = headMarks.length > 0 ? headMarks[headMarks.length - 1].page : row.first_page;
-      const resolvedTailFirstPage =
-        tailFirstPage ?? (tailMarks.length > 0 ? tailMarks[0].page : null);
-
-      await api.put(`/api/chapters/${row.id}`, {
-        content: head,
-        last_page: headLastPage,
-        page_map: headMarks.length > 0 ? headMarks : null,
-      });
-
-      await api.post('/api/chapters', {
-        book_id: row.book_id,
-        number: row.number + 1,
-        title: `${row.title} — part 2`,
-        content: tail,
-        first_page: resolvedTailFirstPage,
-        last_page: row.last_page,
-        page_map: tailMarks.length > 0 ? tailMarks : null,
-      });
-
-      await renumber();
+      // The server saves both parts, their page maps and their order atomically.
+      await api.post(`/api/chapters/${row.id}/split`, { cut });
       setSplittingId(null);
       await reload();
     });

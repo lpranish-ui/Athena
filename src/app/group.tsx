@@ -151,7 +151,7 @@ export default function GroupHomeScreen() {
             </Text>
           ) : (
             <View style={styles.setList}>
-              {sets.slice(0, 8).map((set) => {
+              {sets.map((set) => {
                 const active = set.id === selectedSetId;
                 return (
                   <Pressable

@@ -19,6 +19,10 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'server/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'worker/**'
       - 'assets/**'
       - 'app.json'
       - 'package.json'
@@ -31,7 +35,47 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: athena
+          POSTGRES_PASSWORD: athena-test
+          POSTGRES_DB: athena_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U athena -d athena_test"
+          --health-interval 5s --health-timeout 3s --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgresql://athena:athena-test@localhost:5432/athena_test
+      DATABASE_URL: postgresql://athena:athena-test@localhost:5432/athena_test
+      EXPO_PUBLIC_API_URL: http://localhost:10000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+      - run: npm ci
+      - run: npm ci --prefix server
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:server
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m unittest discover -s worker -p 'test_*.py'
+      - run: npm run audit:dependencies
+      - run: npm audit --prefix server --omit=dev
+
   build-apk:
+    needs: validate
     runs-on: ubuntu-latest
     env:
       EXPO_PUBLIC_API_URL: https://athena-api-w018.onrender.com

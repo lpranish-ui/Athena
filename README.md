@@ -1,218 +1,182 @@
-# Athena 🏛️ — medical study, powered up
+# Athena — medical study
 
-Athena turns any medical book into an interactive quiz — and into a book you can
-actually read. Upload a PDF / EPUB / TXT of **any size**, Athena extracts the
-text and splits it into chapters, DeepSeek AI writes exam-style MCQs with
-verified word-for-word quotes, and a built-in reader (themes, fonts, resume)
-makes studying a pleasure.
-
-Built as one codebase that runs **on the web, Android and iOS** (Expo + React
-Native), backed by a small Node API.
+Athena turns PDF, EPUB and TXT books into a readable chapter library, source-linked
+quizzes, flashcards and summaries. The Expo SDK 57 app runs on web, Android and
+iOS; a Node API and PostgreSQL store accounts and study progress.
 
 ## Features
 
-- **📚 Personal library** — upload books or start from built-in study material;
-  filter by subject (auto-suggested on upload). Uploads are private to your
-  account; built-in books are shared with everyone.
-- **🌊 Any-size uploads** — books stream to the server in 8 MB chunks (flat
-  memory on phone and server). A 500-page textbook is no different from a
-  5-page one. PDFs are extracted with `pdftotext` (poppler) for low-memory,
-  any-size processing; EPUB/TXT also supported.
-- **✂️ Automatic chapter splitting** — bookmarks → printed contents page (with
-  page-offset correction) → "Chapter N" headings → size-based parts. Fix any
-  wrong split yourself (rename, split, merge, delete) from the book screen.
-- **📖 Reader** — read any book inside Athena: Dark / Sepia / Light themes,
-  adjustable text size (14–32), line spacing, serif/sans typefaces, a chapter
-  drawer, and **resume exactly where you left off** (synced per account, so
-  it follows you between phone and web). The Library shows a *Continue
-  reading* shelf with your latest position.
-- **🤖 AI quiz generation** — pick chapters, question type (MCQ, vignette,
-  true/false), difficulty and count; DeepSeek writes fresh questions with
-  per-option explanations. Big books are fine — the model's thinking budget is
-  tuned for chapter-sized prompts, with automatic retries.
-- **📝 Quiz mode** — Tutor mode (feedback after each question) or Exam mode
-  (timed, answers at the end).
-- **🔗 Page-linked questions** — every question cites the book page and shows a
-  word-for-word supporting quote, verified against the extracted text before
-  you see it; a blind second pass answers each question to catch bad keys.
-- **🚩 Flagging** — report a wrong or unclear question; it is hidden for you and
-  one tap builds a replacement.
-- **📈 Progress tracking** — best score per quiz, scores by subject,
-  weak-chapter suggestions, average score on your profile.
-- **🔁 Smart review** — missed questions return on a spaced schedule until they
-  stick; the Quizzes tab shows what's due.
-- **🃏 Study kit** — flashcards (Anki CSV export) and one-page chapter
-  summaries, both with page references.
-- **🗓️ Study planner** — exam date + target exam in your profile; the Quizzes
-  tab shows days to go.
-- **⏱️ Mock exams** — timed runs assembled from your existing questions.
-- **🎓 Group study** — live quiz rooms for friends: same questions, fastest
-  correct answer wins, global leaderboard.
-- **🔐 Accounts** — email/password sign-up and sign-in, per-user data, in-app
-  account deletion.
-
-## Architecture
-
-```
- Phone (APK)  /  Web (browser)  /  Expo Go
-        │
-        ▼
- athena-api  — Render web service (Docker: Node 22 + poppler), oregon
-   │   auth (scrypt + JWT), library, uploads, reader progress, quizzes,
-   │   group study, AI routes (DeepSeek), schema auto-migration on boot
-   ▼
- Postgres (Render "LA carte" instance, internal connection)
-        ▲
- athena web — Render static site (Expo web export, SPA)  → https://athena-27wx.onrender.com
-```
-
-- **APK builds** run free on GitHub Actions (`.github/workflows/build-apk.yml`)
-  — no Expo account needed. The newest build is published to the rolling
-  release `apk-latest`:
-  `https://github.com/lpranish-ui/Athena/releases/download/apk-latest/app-release.apk`
-
-## Project structure
-
-```
-src/                     # the Expo app (web + Android + iOS)
-  app/                   # Expo Router routes (screens)
-    (auth)/              #   sign-in, sign-up
-    (tabs)/              #   library (incl. Continue reading), quizzes, profile
-    book/[id].tsx        #   book detail: Read book, quizzes, chapters, fix splits
-    reader/[bookId].tsx  #   the reader (themes, fonts, resume, drawer)
-    chapter/[id].tsx     #   chapter tools + generate MCQs
-    quiz/[id].tsx        #   quiz runner + results
-    upload.tsx           #   add a book (chunked upload UI, any size)
-    group*.tsx           #   group study rooms
-    ...
-  lib/                   # apiClient (REST), auth, api helpers, files (chunked
-                         # uploader), review scheduler, subjects, format
-  components/, theme/, types/
-server/                  # the API (deployed on Render as a Docker service)
-  src/index.js           #   every route
-  src/auth.js            #   scrypt + JWT auth
-  src/ingest.js          #   PDF (poppler/pdfjs) · EPUB · TXT → chapters
-  src/generate.js        #   quiz generation pipeline (quotes, dedupe, blind check)
-  src/ai.js              #   DeepSeek client (timeouts, retries, call logging)
-  src/group.js           #   live group quiz rooms
-  src/studykit.js        #   flashcards + summaries
-  sql/schema.sql         #   full schema (idempotent; runs on every boot)
-  Dockerfile             #   node:22-slim + poppler-utils
-  scripts/               #   smoke tests, upload tests, repro helpers
-.github/workflows/       # build-apk.yml — free APK builds on GitHub runners
-worker/                  # optional local OCR worker (scanned PDFs — future)
-```
+- **Personal library:** private uploads, shared starter material and subject filters.
+- **Reader:** light/dark/sepia themes, adjustable typography, saved positions,
+  highlights, notes and navigation to distant passages.
+- **Chapter management:** automatic detection plus rename, split, merge and delete.
+- **AI quizzes:** MCQs, clinical vignettes and true/false questions, difficulty
+  selection, per-option explanations, supporting quotes and source PDF pages.
+- **Tutor and exam modes:** feedback after each question or timed results at the end.
+- **Question flagging:** hide unclear questions and request verified replacements.
+- **Progress and smart review:** subject scores, weak chapters, due questions and
+  a spaced review schedule.
+- **Study kit:** source-checked flashcards, Anki CSV export and chapter summaries.
+- **Ask this book:** relevant excerpts, checked citations and abstention when the
+  source cannot support an answer.
+- **Study planner and mock exams:** exam dates, targets and timed runs from existing questions.
+- **Group study:** shared quiz rooms, server-timed answers and leaderboards.
+- **Accounts:** email/password authentication, private data and account deletion.
 
 ## Local development
 
-### 1. App
+Use Node 22.13 or newer ([SDK 57 requirements](https://docs.expo.dev/versions/v57.0.0/)),
+npm and Docker Desktop. From the repository root:
 
-```bash
-npm install
-cp .env.example .env     # then set:
-# EXPO_PUBLIC_API_URL=https://athena-api-w018.onrender.com   (or a local server)
-npm start                # press w (web) / a (android) / i (ios)
+```powershell
+npm ci
+npm ci --prefix server
+docker compose up -d
 ```
 
-### 2. API (optional — only if you're changing the server)
+Compose runs PostgreSQL 17 on `127.0.0.1:5434` with a persistent Docker volume.
+Create the ignored `server/.env.local`:
 
-```bash
-cd server
-npm install
-# server/.env:
-#   DATABASE_URL=postgresql://…    (Render Postgres internal URL in prod)
-#   JWT_SECRET=…                   (any long random string)
-#   DEEPSEEK_API_KEY=sk-…          (never goes in the app)
-#   DEEPSEEK_MODEL=deepseek-flash  (optional; default deepseek-flash)
-node src/index.js
+```dotenv
+DATABASE_URL=postgresql://athena:athena-local-development@127.0.0.1:5434/athena
+JWT_SECRET=replace-with-a-long-random-local-secret
+PORT=10000
+DEEPSEEK_API_KEY=
+DEEPSEEK_MODEL=deepseek-flash
+DEEPSEEK_VERIFY_MODEL=deepseek-flash
 ```
 
-The server runs its schema bootstrap on every boot — `server/sql/schema.sql` is
-idempotent, so new tables roll out with each deploy.
+Create the ignored root `.env.local`:
 
-> Local note: PDF extraction falls back to `pdfjs-dist` when `pdftotext` is not
-> installed (the Docker image includes poppler; Windows dev machines usually
-> don't).
-
-## Deployment
-
-Everything auto-deploys from `main`:
-
-1. **API** — Render web service `athena-api` (Docker, `server/Dockerfile`).
-   Env vars live in Render: `DATABASE_URL`, `JWT_SECRET`, `DEEPSEEK_API_KEY`,
-   `DEEPSEEK_MODEL`, `DEEPSEEK_VERIFY_MODEL`. Health: `/api/health`.
-2. **Web app** — Render static site `Athena` → `https://athena-27wx.onrender.com`
-   (build: `npm install && npx expo export --platform web`, publish `dist`,
-   SPA rewrite `/* → /index.html`, env `EXPO_PUBLIC_API_URL`).
-3. **Android APK** — GitHub Actions on pushes that touch `src/**` / config.
-   Download the newest: releases → tag `apk-latest`.
-
-## How uploads work (any size)
-
-1. The app asks the API to create the book, then streams the file in **8 MB
-   chunks** (`PUT /api/uploads/:id/chunk`) — each chunk is appended to a temp
-   file on the server; memory stays flat for any file size.
-2. `POST /api/uploads/:id/finish` starts background extraction: `pdftotext`
-   (PDF, tiny memory), EPUB unzip, or plain text.
-3. The app polls the book row and shows live progress
-   ("Uploading… 45%" → "Extracting text…" → "Detecting chapters…").
-4. Chapters are stored with page maps; the temp file is deleted immediately.
-   Interrupted uploads are swept clean a short while later.
-
-## How a quiz gets made
-
-1. Chapter text is sent to the API with `[p. N]` page markers.
-2. DeepSeek drafts questions (with retries if a sample comes back empty or
-   stalls — the client enforces timeouts and re-samples).
-3. Quality gates before you see anything:
-   - exactly one correct option, no “all of the above”;
-   - the supporting quote must appear **word for word** in the chapter (page
-     located from the text itself; PDF spacing artifacts tolerated);
-   - near-duplicates of stored stems are dropped;
-   - if a whole draft fails the quote check, the server re-asks once
-     automatically;
-   - a blind second pass answers everything without seeing the key —
-     disagreements are dropped.
-4. Passing questions are saved with page, quote and per-option explanations.
-
-## Troubleshooting
-
-| Problem | Fix |
-| --- | --- |
-| App shows “Almost there” setup screen | `.env` missing `EXPO_PUBLIC_API_URL` — restart the dev server after fixing |
-| Upload stuck on “Uploading…” | Check your connection; interrupted uploads are marked failed after an hour — delete and retry |
-| “This PDF is a scan” | Scanned PDFs have no text layer — OCR is on the roadmap; use a text PDF/EPUB/TXT |
-| “Already uploaded this file” | Duplicate detection — delete the older copy first |
-| Quiz generation failed | The server retries automatically; if a sample still fails, tap generate again — every AI call is logged (`ai call ok/empty/failed`) for debugging |
-| Web app shows old version | Render rebuilds on push; check the static site's deploys |
-| APK out of date | Every push to `src/**` rebuilds it; grab the newest from the `apk-latest` release |
-
-## Useful commands
-
-```bash
-npm start                 # dev server (w/a/i)
-npm run typecheck         # TypeScript check
-npx expo lint             # lint
-gh run list -R lpranish-ui/Athena    # APK build status
-gh run watch <id> -R lpranish-ui/Athena
-node server/scripts/test-big-upload.js <file> <pdf|txt>   # any-size pipeline test
-node server/scripts/make-test-files.js pdf <out> 600      # generate a big test PDF
+```dotenv
+EXPO_PUBLIC_API_URL=http://127.0.0.1:10000
 ```
 
-## Roadmap
+Keep both files local. `JWT_SECRET` must be configured; a DeepSeek key is optional
+for the local fixtures and is needed only for new AI generation. The server dev
+command loads `server/.env.local` after `server/.env`, so local settings override
+older configuration without modifying it.
 
-Next milestones:
-- OCR for scanned books (Tesseract + Ghostscript; the local `worker/` prototype
-  exists — needs a home with more CPU/RAM than the free tier).
-- Highlights + notes in the reader.
-- Public starter library with licensed content.
-- Admin flag-review dashboard (`ai_calls` already logs every AI call).
-- Offline mode with on-device caching.
+Start the API in one terminal:
 
-## Notes
+```powershell
+npm --prefix server run dev
+```
 
-- App icons and splash images in `assets/images/` are Expo template
-  placeholders — replace with Athena branding before release.
-- Write your own built-in study material, or use public-domain sources; never
-  ship copyrighted books as defaults.
-- Rotate `DEEPSEEK_API_KEY` / `JWT_SECRET` periodically in the Render dashboard.
+Startup applies `server/sql/schema.sql`. After the API is ready, use another terminal:
+
+```powershell
+node --env-file=server/.env.local server/scripts/seed-local.js
+npm run web -- --port 8083
+```
+
+Open [the local preview](http://localhost:8083). Sign in with the synthetic account
+`local@athena.test` / `AthenaLocal2026!`. The seed script refuses remote databases;
+its reader and quiz fixtures require no AI calls. API health is
+[http://localhost:10000/api/health](http://localhost:10000/api/health).
+
+For mobile development, run `npm start` and use Expo Go or a development build.
+On a physical phone, set `EXPO_PUBLIC_API_URL` to your computer's LAN address and
+API port, then restart Expo. Default Expo ports also work; 8083 is the local
+preview convention. Use `npx expo install <package>` for SDK-compatible dependency
+versions, following the [Expo CLI documentation](https://docs.expo.dev/more/expo-cli/).
+
+## Checks and tests
+
+```powershell
+npm run lint
+npm run typecheck
+npm test
+npm run test:server
+python -B -m unittest discover -s worker -p test_*.py
+npm run audit:dependencies
+npm audit --prefix server --omit=dev
+```
+
+Server unit/pipeline tests are local and make no provider calls. Database
+integration tests are skipped unless `TEST_DATABASE_URL` points to a loopback
+database named **athena_test**. Create that separate database once, then run the
+full server suite:
+
+```powershell
+docker compose exec postgres createdb -U athena athena_test
+$env:TEST_DATABASE_URL="postgresql://athena:athena-local-development@127.0.0.1:5434/athena_test"
+npm run test:server
+```
+
+Integration tests create and remove an isolated schema in that test database.
+The GitHub workflow runs lint, typecheck, app/server/Python tests, PostgreSQL
+integration checks and dependency audits before building an APK. Manual tools
+under `server/scripts/` include smoke/repro scripts that contact live services;
+use the `tests/` suites for routine local verification.
+
+## Upload and AI pipeline
+
+Uploads use 8 MB chunks with explicit byte offsets. PostgreSQL stores chunks,
+received byte counts and processing leases; repeated chunks are idempotent, the
+final size is checked, and interrupted processing resumes after a restart.
+The default file limit is **512 MB**, configurable through server
+`MAX_UPLOAD_BYTES`; each account can have five active uploads.
+
+Searchable PDFs use Poppler's `pdftotext` in the API Docker image. Local development
+falls back to pdf.js when Poppler is absent. EPUB extraction inflates only package
+metadata and spine text, excluding image payloads. Extracted text is limited to
+six million characters; oversized books fail with a request to split volumes
+instead of silently losing later chapters. Chapter writes and the ready status
+commit together, and replaying a completed job preserves existing chapter IDs.
+
+Scanned PDFs attempt optional OCRmyPDF when it is installed on the API host,
+with Tesseract, Ghostscript and the required language data. Set `OCR_LANG`
+(default `eng`). Missing tools produce a readable upload error; OCR has a
+ten-minute limit. See [optional OCR setup and the local diagnostic CLI](worker/README.md).
+No Supabase account or service-role key is used.
+
+AI prompts use bounded excerpts spread across the selected chapters; later quiz
+batches rotate interior windows. Source page maps remain accurate after sampling
+or chapter merges. Long chapters are sampled rather than sent in full.
+Questions require strict option/key validation, an actual supporting quote,
+duplicate filtering and a blind answer check. Missing or failed checks cannot
+save unverified questions. Flashcards, summaries and book answers also require
+matched source quotes and a separate fact check; unavailable evidence yields an
+error or a book-answer abstention. Pages identify source PDF pages, which may
+differ from printed page labels.
+
+Per-user AI request limits use `AI_REQUESTS_PER_HOUR` (default 100) and
+`AI_CONCURRENT_PER_USER` (default 2). Counters are held in each API process and
+reset when that process restarts.
+
+## Structure and deployment
+
+```text
+src/app/                 Expo Router screens; auth, library, reader and study tools
+src/lib/                 API, authentication, uploads and review helpers
+src/components/          Shared mobile UI
+server/src/app.js        Testable route factory
+server/src/index.js      Schema bootstrap, upload worker and API entry point
+server/src/uploads.js    Durable chunk upload service and processing worker
+server/src/ingest.js     PDF/EPUB/TXT extraction and chapter persistence
+server/src/               AI generation, grounding, retrieval, auth and group modules
+server/sql/              PostgreSQL schema and starter material
+server/tests/            Local regression and dedicated-database integration tests
+worker/                  Optional local PDF/OCR diagnostics and pure Python tests
+compose.yaml             Local PostgreSQL
+.github/workflows/       Validation and Android APK build
+```
+
+The configured hosted API is `athena-api` on Render, built from `server/Dockerfile`
+(Node 22 plus Poppler). Set server-side `DATABASE_URL`, `JWT_SECRET` and optional
+DeepSeek settings in the hosting environment; the API defaults to port 8787 unless
+`PORT` is set. A web export uses `npx expo export --platform web`, publishes `dist`
+and needs a SPA rewrite to `/index.html` plus `EXPO_PUBLIC_API_URL`.
+
+GitHub Actions publishes the development APK to the rolling
+[apk-latest release](https://github.com/lpranish-ui/Athena/releases/tag/apk-latest).
+That workflow uses a debug signing key; app-store distribution needs release
+signing. For the existing EAS preview profile, use
+`npx eas-cli@latest build --platform android --profile preview`
+([EAS setup](https://docs.expo.dev/build/setup/)).
+
+Future work includes broader licensed starter material, an admin question-review
+dashboard and offline study. Replace the Expo placeholder icons before release.
+Ship original or appropriately licensed default content, and keep provider/JWT
+secrets in the server environment.

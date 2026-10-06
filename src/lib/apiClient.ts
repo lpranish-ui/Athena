@@ -4,6 +4,7 @@
 // The sign-in token is kept in AsyncStorage and sent as a Bearer header.
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { fetchText } from './request';
 
 const rawBase = (process.env.EXPO_PUBLIC_API_URL ?? '').trim();
 export const API_URL = rawBase.replace(/\/+$/, '');
@@ -91,14 +92,11 @@ export async function apiRequest<T>(
     body = JSON.stringify(options.body);
   }
 
-  const signal =
-    options.timeoutMs && typeof AbortSignal !== 'undefined' && 'timeout' in AbortSignal
-      ? AbortSignal.timeout(options.timeoutMs)
-      : undefined;
-
-  let response: Response;
+  let response: Awaited<ReturnType<typeof fetchText>>;
   try {
-    response = await fetch(`${API_URL}${path}`, { method, headers, body, signal });
+    const timeoutMs = options.timeoutMs ??
+      (path.startsWith('/api/ai/') || path.endsWith('/ask') ? 600000 : 30000);
+    response = await fetchText(`${API_URL}${path}`, { method, headers, body }, timeoutMs);
   } catch (error) {
     const detail = error instanceof Error ? error.message : '';
     throw new ApiError(
@@ -107,7 +105,7 @@ export async function apiRequest<T>(
     );
   }
 
-  const text = await response.text();
+  const text = response.text;
   let data: unknown = null;
   try {
     data = text ? JSON.parse(text) : null;

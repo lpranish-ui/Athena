@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: athena-local-postgres
+    environment:
+      POSTGRES_USER: athena
+      POSTGRES_PASSWORD: athena-local-development
+      POSTGRES_DB: athena
+    ports:
+      - "127.0.0.1:5434:5432"
+    volumes:
+      - athena-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U athena -d athena"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  athena-postgres:

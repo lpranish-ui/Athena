@@ -6,7 +6,9 @@ import { useCallback, useState } from 'react';
 import { Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
+import { LoadError } from '@/components/LoadError';
 import { Button, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
+import { saveFlashcards } from '@/lib/api';
 import { api } from '@/lib/apiClient';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import type { Flashcard, StudyMaterial } from '@/types';
@@ -22,9 +24,15 @@ export default function FlashcardsScreen() {
   const [index, setIndex] = useState(0);
   const [revealed, setRevealed] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!chapterId) return;
+    if (!chapterId) {
+      setError('No chapter was selected.');
+      setLoading(false);
+      return;
+    }
 
     try {
       const [materials, chapter] = await Promise.all([
@@ -56,6 +64,26 @@ export default function FlashcardsScreen() {
   const previous = () => {
     setRevealed(false);
     setIndex((value) => (value - 1 + cards.length) % cards.length);
+  };
+
+  const saveToReview = async () => {
+    if (!chapterId || cards.length === 0 || saving) return;
+    setSaving(true);
+    try {
+      const result = await saveFlashcards(
+        chapterId,
+        cards.map((card) => ({ front: card.front, back: card.back, topic: card.topic })),
+      );
+      setSaveMessage(
+        result.saved > 0
+          ? `Saved ${result.saved} new card${result.saved === 1 ? '' : 's'} to your review deck — find them under Review decks in the library.`
+          : 'All of these cards are already in your review deck.',
+      );
+    } catch (err) {
+      setSaveMessage(err instanceof Error ? err.message : 'Could not save the cards.');
+    } finally {
+      setSaving(false);
+    }
   };
 
   const exportCsv = async () => {
@@ -94,6 +122,15 @@ export default function FlashcardsScreen() {
 
   if (loading) {
     return <LoadingView label="Loading flashcards…" />;
+  }
+
+  if (error && cards.length === 0) {
+    return (
+      <Screen>
+        <Stack.Screen options={{ title: 'Flashcards' }} />
+        <LoadError message={error} onRetry={() => { setLoading(true); void load(); }} />
+      </Screen>
+    );
   }
 
   if (cards.length === 0) {
@@ -160,6 +197,15 @@ export default function FlashcardsScreen() {
         </View>
 
         {exportMessage ? <Text style={styles.exportMessage}>{exportMessage}</Text> : null}
+
+        {saveMessage ? <Text style={styles.exportMessage}>{saveMessage}</Text> : null}
+
+        <Button
+          label="Save to review deck"
+          icon="sparkles-outline"
+          loading={saving}
+          onPress={() => void saveToReview()}
+        />
 
         <Button
           variant="ghost"

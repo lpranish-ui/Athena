@@ -14,8 +14,10 @@
 // ============================================================================
 
 import { chatJson, getVerifyModel, MissingKeyError } from './ai.js';
-import { one, query } from './db.js';
+import { one, query, withTransaction } from './db.js';
 import { HttpError } from './http.js';
+import { contextWithPageMarkers, sampleChapterContext } from './context.js';
+import { verifiedQuestionChoices } from './grounding.js';
 import {
     fixedChaptersSection,
     normalizeForMatch,
@@ -24,7 +26,6 @@ import {
     requestSection,
     SYSTEM_PROMPT,
     validateQuestion,
-    withPageMarkers,
 } from './questions.js';
 
 const MIN_QUESTIONS = 5;
@@ -85,8 +86,8 @@ async function getTargetExam(userId) {
 /**
  * Blind check: a second, cheaper model answers each question from the same
  * passages without ever seeing the key. Questions whose blind answer
- * disagrees are dropped. Returns null when the check itself could not run
- * (in that case all questions are kept).
+ * disagrees are dropped. Missing answers or an unavailable check never permit
+ * an unverified question to be saved.
  */
 async function verifyAnswers(questions, contexts, userId) {
   try {
@@ -100,7 +101,8 @@ async function verifyAnswers(questions, contexts, userId) {
       model: getVerifyModel(),
       temperature: 0,
       maxTokens: 2000,
-      timeoutMs: 30000, // verification is best-effort — never stall the request
+      timeoutMs: 30000,
+      thinking: 'disabled',
       meta: { userId, purpose: 'verify_mcqs' },
       messages: [
         {
@@ -117,7 +119,7 @@ async function verifyAnswers(questions, contexts, userId) {
               chapters: contexts.map((context, index) => ({
                 title: context.title,
                 number: index + 1,
-                textWithMarkers: withPageMarkers(context.content, context.pageMap),
+                textWithMarkers: contextWithPageMarkers(context),
               })),
             }),
             '',
@@ -130,21 +132,9 @@ async function verifyAnswers(questions, contexts, userId) {
     });
 
     const parsed = JSON.parse(raw.replace(/```(?:json)?/g, '').trim());
-    if (!Array.isArray(parsed.answers)) return null;
-
-    const chosen = new Map();
-    for (const answer of parsed.answers) {
-      if (Number.isInteger(answer?.question_index) && Number.isInteger(answer?.option_index)) {
-        chosen.set(answer.question_index, answer.option_index);
-      }
-    }
-
-    return questions.filter((question, index) => {
-      const blind = chosen.get(index + 1);
-      return blind === undefined || blind === question.correct_index;
-    });
+    return verifiedQuestionChoices(questions, parsed.answers);
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -164,12 +154,16 @@ export async function generateMcqs({ userId, body }) {
           ? [body.chapterId]
           : []
     ).filter((id) => typeof id === 'string' && id.length > 0);
+    ids = [...new Set(ids)];
 
     if (ids.length > MAX_CHAPTERS_PER_SET) {
       throw new HttpError(400, `Choose at most ${MAX_CHAPTERS_PER_SET} chapters per quiz.`);
     }
 
-    const count = Math.min(Math.max(Math.round(body.count ?? 10), MIN_QUESTIONS), MAX_QUESTIONS);
+    if (body.count != null && (!Number.isInteger(body.count) || !Number.isFinite(body.count))) {
+      throw new HttpError(400, 'count must be an integer.');
+    }
+    const count = Math.min(Math.max(body.count ?? 10, MIN_QUESTIONS), MAX_QUESTIONS);
     const difficulty = body.difficulty === 'easy' || body.difficulty === 'hard' ? body.difficulty : 'medium';
     const type = QUESTION_TYPES.includes(body.questionType) ? body.questionType : 'single_best_answer';
 
@@ -206,6 +200,7 @@ export async function generateMcqs({ userId, body }) {
     if (ids.length === 0) {
       throw new HttpError(400, 'chapterIds (or chapterId) is required.');
     }
+    if (ids.length > MAX_CHAPTERS_PER_SET) throw new HttpError(400, 'This quiz has too many chapters to extend.');
 
     const ordered = await loadChapterContexts(userId, ids);
 
@@ -225,15 +220,8 @@ export async function generateMcqs({ userId, body }) {
           ).then((r) => r.rows.map((row) => row.question)),
     ]);
 
-    const perChapterLimit = Math.max(6000, Math.floor(TOTAL_PROMPT_CHAR_BUDGET / ordered.length));
-    const contexts = ordered.map((row) => ({
-      id: row.id,
-      title: row.title,
-      content: row.content.slice(0, Math.min(PER_CHAPTER_CHAR_CAP, perChapterLimit)),
-      pageMap: row.page_map ?? null,
-      firstPage: row.first_page ?? null,
-      lastPage: row.last_page ?? null,
-    }));
+    const perChapterLimit = Math.min(PER_CHAPTER_CHAR_CAP, Math.floor(TOTAL_PROMPT_CHAR_BUDGET / ordered.length));
+    const contexts = ordered.map((row) => sampleChapterContext(row, perChapterLimit, { phase: existingStems.length }));
 
     const book = { title: ordered[0].book_title, subject: ordered[0].book_subject };
     const multiChapter = contexts.length > 1;
@@ -249,7 +237,7 @@ export async function generateMcqs({ userId, body }) {
             chapters: contexts.map((context, index) => ({
               title: context.title,
               number: index + 1,
-              textWithMarkers: withPageMarkers(context.content, context.pageMap),
+              textWithMarkers: contextWithPageMarkers(context),
             })),
           }),
           '',
@@ -322,59 +310,58 @@ export async function generateMcqs({ userId, body }) {
 
     // ---- blind verification (a second, independent answer check) ------------
     const verified = await verifyAnswers(questions, contexts, userId);
-    if (verified !== null) {
-      if (verified.length === 0) {
-        throw new HttpError(502, 'No question survived the independent answer check. Please try again.');
-      }
-      questions.length = 0;
-      questions.push(...verified);
+    if (verified.length === 0) {
+      throw new HttpError(502, 'The blind answer check could not verify these questions. Please try again.');
     }
+    questions = verified;
 
     // ---- store --------------------------------------------------------------
-    let setId = targetSetId;
-    if (!setId) {
-      const title = multiChapter
-        ? `${book?.title ?? 'Book'} — Ch. ${ordered.map((row) => row.number).join(', ')} · ${questions.length} MCQs`
-        : `${ordered[0].title} — ${questions.length} MCQs`;
-
-      const set = await one(
-        `insert into mcq_sets (chapter_id, chapter_ids, user_id, title, difficulty, status)
-         values ($1, $2::uuid[], $3, $4, $5, 'ready') returning id`,
-        [ordered[0].id, ids, userId, title, difficulty],
-      );
-      if (!set) throw new HttpError(500, 'Could not save the quiz. Please try again.');
-      setId = set.id;
-    }
-
-    const rows = questions.map((question, index) => ({
-      set_id: setId,
-      position: startPosition + index,
-      question: question.question,
-      options: question.options,
-      correct_index: question.correct_index,
-      explanation: question.explanation,
-      option_explanations: question.option_explanations,
-      question_type: question.type,
-      source_page: question.source_page,
-      supporting_quote: question.supporting_quote,
-      topic: question.topic ?? null,
-      chapter_id: contexts[question.chapterIndex]?.id ?? ordered[0].id,
-    }));
-
-    try {
-      await insertMcqs(rows);
-    } catch (error) {
-      if (!targetSetId && setId) {
-        await query('delete from mcq_sets where id = $1', [setId]).catch(() => {});
+    return await withTransaction(async (client) => {
+      const oneTx = async (sql, params) => (await client.query(sql, params)).rows[0] ?? null;
+      if (targetSetId) {
+        const locked = await oneTx('select id from mcq_sets where id = $1 and user_id = $2 for update', [targetSetId, userId]);
+        if (!locked) throw new HttpError(404, 'Quiz no longer available.');
+        const lastRow = await oneTx('select max(position) as position from mcqs where set_id = $1', [targetSetId]);
+        startPosition = (lastRow?.position ?? 0) + 1;
       }
-      throw new HttpError(500, `Could not save the questions: ${errorMessageOf(error)}`);
-    }
+      let setId = targetSetId;
+      if (!setId) {
+        const title = multiChapter
+          ? `${book?.title ?? 'Book'} — Ch. ${ordered.map((row) => row.number).join(', ')} · ${questions.length} MCQs`
+          : `${ordered[0].title} — ${questions.length} MCQs`;
 
-    return {
-      setId,
-      count: rows.length,
-      total: startPosition - 1 + rows.length,
-    };
+        const set = await oneTx(
+          `insert into mcq_sets (chapter_id, chapter_ids, user_id, title, difficulty, status)
+           values ($1, $2::uuid[], $3, $4, $5, 'ready') returning id`,
+          [ordered[0].id, ids, userId, title, difficulty],
+        );
+        if (!set) throw new HttpError(500, 'Could not save the quiz. Please try again.');
+        setId = set.id;
+      }
+
+      const rows = questions.map((question, index) => ({
+        set_id: setId,
+        position: startPosition + index,
+        question: question.question,
+        options: question.options,
+        correct_index: question.correct_index,
+        explanation: question.explanation,
+        option_explanations: question.option_explanations,
+        question_type: question.type,
+        source_page: question.source_page,
+        supporting_quote: question.supporting_quote,
+        topic: question.topic ?? null,
+        chapter_id: contexts[question.chapterIndex]?.id ?? ordered[0].id,
+      }));
+
+      await insertMcqs(rows, client.query.bind(client));
+
+      return {
+        setId,
+        count: rows.length,
+        total: startPosition - 1 + rows.length,
+      };
+    });
   } catch (error) {
     if (error instanceof MissingKeyError) throw new HttpError(500, error.message);
     if (error instanceof HttpError) throw error;
@@ -382,11 +369,7 @@ export async function generateMcqs({ userId, body }) {
   }
 }
 
-function errorMessageOf(error) {
-  return error instanceof Error && error.message ? error.message : 'unknown error';
-}
-
-async function insertMcqs(rows) {
+async function insertMcqs(rows, execute = query) {
   const placeholders = [];
   const params = [];
 
@@ -411,7 +394,7 @@ async function insertMcqs(rows) {
     );
   });
 
-  await query(
+  await execute(
     `insert into mcqs
        (set_id, position, question, options, correct_index, explanation, option_explanations,
         question_type, source_page, supporting_quote, topic, chapter_id)
@@ -478,14 +461,7 @@ export async function replaceQuestion({ userId, questionId }) {
       ? questionRow.question_type
       : 'single_best_answer';
 
-    const context = {
-      id: chapter.id,
-      title: chapter.title,
-      content: chapter.content.slice(0, 16000),
-      pageMap: chapter.page_map ?? null,
-      firstPage: chapter.first_page ?? null,
-      lastPage: chapter.last_page ?? null,
-    };
+    const context = sampleChapterContext(chapter, PER_CHAPTER_CHAR_CAP, { phase: existingStems.length });
 
     const raw = await chatJson({
       messages: [
@@ -500,7 +476,7 @@ export async function replaceQuestion({ userId, questionId }) {
                 {
                   title: context.title,
                   number: 1,
-                  textWithMarkers: withPageMarkers(context.content, context.pageMap),
+                  textWithMarkers: contextWithPageMarkers(context),
                 },
               ],
             }),
@@ -537,38 +513,45 @@ export async function replaceQuestion({ userId, questionId }) {
     if (!replacement) {
       throw new HttpError(502, 'Could not build a valid replacement question. Please try again.');
     }
+    const verified = await verifyAnswers([replacement], [context], userId);
+    if (verified.length !== 1) throw new HttpError(502, 'The blind answer check could not verify the replacement. Please try again.');
 
-    const lastRow = await one(
-      'select position from mcqs where set_id = $1 order by position desc limit 1',
-      [questionRow.set_id],
-    );
-    const position = (lastRow?.position ?? 0) + 1;
+    return await withTransaction(async (client) => {
+      const oneTx = async (sql, params) => (await client.query(sql, params)).rows[0] ?? null;
+      const locked = await oneTx('select id from mcq_sets where id = $1 and user_id = $2 for update', [questionRow.set_id, userId]);
+      if (!locked) throw new HttpError(404, 'Quiz no longer available.');
+      const lastRow = await oneTx(
+        'select position from mcqs where set_id = $1 order by position desc limit 1',
+        [questionRow.set_id],
+      );
+      const position = (lastRow?.position ?? 0) + 1;
 
-    const inserted = await one(
-      `insert into mcqs
-         (set_id, position, question, options, correct_index, explanation, option_explanations,
-          question_type, source_page, supporting_quote, topic, chapter_id)
-       values ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
-       returning id`,
-      [
-        questionRow.set_id,
-        position,
-        replacement.question,
-        JSON.stringify(replacement.options),
-        replacement.correct_index,
-        replacement.explanation,
-        JSON.stringify(replacement.option_explanations),
-        replacement.type,
-        replacement.source_page,
-        replacement.supporting_quote,
-        replacement.topic ?? null,
-        chapter.id,
-      ],
-    );
+      const inserted = await oneTx(
+        `insert into mcqs
+           (set_id, position, question, options, correct_index, explanation, option_explanations,
+            question_type, source_page, supporting_quote, topic, chapter_id)
+         values ($1, $2, $3, $4::jsonb, $5, $6, $7::jsonb, $8, $9, $10, $11, $12)
+         returning id`,
+        [
+          questionRow.set_id,
+          position,
+          replacement.question,
+          JSON.stringify(replacement.options),
+          replacement.correct_index,
+          replacement.explanation,
+          JSON.stringify(replacement.option_explanations),
+          replacement.type,
+          replacement.source_page,
+          replacement.supporting_quote,
+          replacement.topic ?? null,
+          chapter.id,
+        ],
+      );
 
-    if (!inserted) throw new HttpError(500, 'Could not save the replacement question.');
+      if (!inserted) throw new HttpError(500, 'Could not save the replacement question.');
 
-    return { mcqId: inserted.id };
+      return { mcqId: inserted.id };
+    });
   } catch (error) {
     if (error instanceof MissingKeyError) throw new HttpError(500, error.message);
     if (error instanceof HttpError) throw error;

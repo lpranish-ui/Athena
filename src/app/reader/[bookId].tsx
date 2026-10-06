@@ -7,12 +7,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { StatusBar } from 'expo-status-bar';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
-  NativeScrollEvent,
-  NativeSyntheticEvent,
+  FlatList,
   Platform,
   Pressable,
   ScrollView,
@@ -23,13 +23,16 @@ import {
 } from 'react-native';
 
 import { LoadingView } from '@/components/ui';
+import { ReaderParagraph } from '@/components/ReaderParagraph';
+import { ReaderCell, ReaderCellLayoutContext } from '@/components/ReaderCell';
+import { useReaderPosition } from '@/hooks/useReaderPosition';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   addReaderNote,
   askBook,
   deleteReaderNote,
   getReaderNotes,
   getReadingProgress,
-  saveReadingProgress,
   searchBook,
   type BookAnswer,
   type BookSearchHit,
@@ -62,10 +65,6 @@ const HIGHLIGHT_TINTS: Record<HighlightColor, Record<ThemeName, string>> = {
   pink: { dark: 'rgba(232,120,170,0.20)', sepia: 'rgba(232,120,170,0.22)', light: 'rgba(232,120,170,0.15)' },
 };
 
-// Clock read kept at module scope — it runs from scroll callbacks, never
-// during render, but the React compiler's purity rule is conservative.
-const nowMs: () => number = Date.now.bind(Date);
-
 interface ReaderSettings {
   theme: ThemeName;
   fontSize: number;
@@ -75,6 +74,7 @@ interface ReaderSettings {
 
 const SETTINGS_KEY = 'athena.reader.settings';
 const DEFAULT_SETTINGS: ReaderSettings = { theme: 'dark', fontSize: 18, spacing: 'normal', serif: false };
+const READER_VIEWABILITY = { itemVisiblePercentThreshold: 0 };
 
 interface ChapterContent {
   id: string;
@@ -90,6 +90,7 @@ export default function ReaderScreen() {
     jumpParagraph?: string;
   }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   const [book, setBook] = useState<Book | null>(null);
   const [chapters, setChapters] = useState<ChapterSummary[]>([]);
@@ -99,6 +100,7 @@ export default function ReaderScreen() {
   const [loadingChapter, setLoadingChapter] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [settings, setSettings] = useState<ReaderSettings>(DEFAULT_SETTINGS);
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chaptersOpen, setChaptersOpen] = useState(false);
   const [notes, setNotes] = useState<ReaderNote[]>([]);
@@ -115,85 +117,24 @@ export default function ReaderScreen() {
   const [searching, setSearching] = useState(false);
   const [askMode, setAskMode] = useState<'search' | 'ask'>('search');
   const [askQuestion, setAskQuestion] = useState('');
-  const [askAnswer, setAskAnswer] = useState<BookAnswer | null>(null);
+  const [askAnswer, setAskAnswer] = useState<{ question: string; result: BookAnswer } | null>(null);
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
   const [noteColor, setNoteColor] = useState<HighlightColor>('gold');
 
-  const scrollRef = useRef<ScrollView>(null);
-  const pendingScrollRef = useRef<number | null>(null);
-  const pendingParagraphRef = useRef<number | null>(null);
-  const pendingParagraphChapterRef = useRef<string | null>(null);
-  const paragraphJumpTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const paragraphLayoutsRef = useRef<Map<number, number>>(new Map());
-  const contentHeightRef = useRef(0);
-  const layoutHeightRef = useRef(0);
-  const ratioRef = useRef(0);
-  const chapterIdRef = useRef<string | null>(null);
-  const lastSaveRef = useRef(0);
-  const suppressScrollRef = useRef(false);
-  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const {
+    scrollRef, pendingScrollRef, pendingParagraphRef, pendingParagraphChapterRef,
+    paragraphCountRef, ratioRef, chapterIdRef, cancelSettle, cancelParagraphJump,
+    flushProgress, tryJumpToParagraph, handleScroll, handleContentSize, handleLayout,
+    handleUserScroll, handleScrollToIndexFailed, handleCellLayout, handleViewableItemsChanged, resetMetrics,
+  } = useReaderPosition(bookId);
   const pendingSearchRef = useRef<{ chapterId: string; needle: string } | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchSeqRef = useRef(0);
 
-  // Stop re-applying the saved position (user took over, or a new jump).
-  const cancelSettle = useCallback(() => {
-    if (settleTimerRef.current !== null) {
-      clearTimeout(settleTimerRef.current);
-      settleTimerRef.current = null;
-    }
+  useEffect(() => () => {
+    if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
   }, []);
-
-  // Drop any pending jump-to-paragraph target.
-  const cancelParagraphJump = useCallback(() => {
-    if (paragraphJumpTimerRef.current !== null) {
-      clearTimeout(paragraphJumpTimerRef.current);
-      paragraphJumpTimerRef.current = null;
-    }
-    pendingParagraphRef.current = null;
-    pendingParagraphChapterRef.current = null;
-  }, []);
-
-  /** Offset of one paragraph inside the scroll content. Web measures the DOM
-   *  on demand (initial onLayout never fires there); native uses the layout
-   *  map, which RN fills reliably. Returns null when not measurable yet. */
-  const measureParagraph = useCallback((paragraphIndex: number): number | null => {
-    if (Platform.OS === 'web') {
-      type DomBox = { getBoundingClientRect: () => { top: number }; scrollTop: number };
-      const scroller = (scrollRef.current as unknown as { getScrollableNode?: () => DomBox | null } | null)?.getScrollableNode?.();
-      const doc = (globalThis as { document?: { querySelector: (selector: string) => DomBox | null } }).document;
-      const el = doc?.querySelector(`[data-pidx="${paragraphIndex}"]`);
-      if (!scroller || !el) return null;
-      return el.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-    }
-    const y = paragraphLayoutsRef.current.get(paragraphIndex);
-    return y === undefined ? null : y;
-  }, []);
-
-  const tryJumpToParagraph = useCallback(() => {
-    const target = pendingParagraphRef.current;
-    if (target === null) return;
-    // The jump belongs to one chapter — ignore layouts of any other chapter.
-    const targetChapter = pendingParagraphChapterRef.current;
-    if (targetChapter !== null && targetChapter !== chapterIdRef.current) return;
-    const y = measureParagraph(target);
-    if (y === null) return;
-    // The precise paragraph position wins over any resume re-apply.
-    cancelSettle();
-    pendingScrollRef.current = null;
-    suppressScrollRef.current = true;
-    scrollRef.current?.scrollTo({ y: Math.max(0, y - 16), animated: false });
-    // Keep re-applying while the layout settles, then let go — a real user
-    // scroll (or another jump) cancels it first.
-    if (paragraphJumpTimerRef.current === null) {
-      paragraphJumpTimerRef.current = setTimeout(() => {
-        paragraphJumpTimerRef.current = null;
-        pendingParagraphRef.current = null;
-        pendingParagraphChapterRef.current = null;
-      }, 900);
-    }
-  }, [cancelSettle, measureParagraph]);
 
   const theme = READER_THEMES[settings.theme];
 
@@ -221,6 +162,7 @@ export default function ReaderScreen() {
           }
         }
 
+        setSettingsLoaded(true);
         setBook(bookData);
         setChapters(chaptersData);
 
@@ -251,17 +193,18 @@ export default function ReaderScreen() {
             }
           }
         }
+        const savedChapterMatches = progress?.chapter_id === chaptersData[startIndex]?.id;
+        const resumeRatio = savedChapterMatches ? (progress?.offset_ratio ?? 0) : 0;
+        ratioRef.current = jumpChapter && pendingParagraphRef.current !== null ? 0 : resumeRatio;
         pendingScrollRef.current =
-          jumpChapter && pendingParagraphRef.current !== null
-            ? null
-            : (progress?.offset_ratio ?? 0);
+          jumpChapter && pendingParagraphRef.current !== null ? null : resumeRatio;
         setIndex(startIndex);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Could not open this book.');
         setLoading(false);
       }
     })();
-  }, [bookId, jumpChapter, jumpParagraph]);
+  }, [bookId, jumpChapter, jumpParagraph, pendingParagraphChapterRef, pendingParagraphRef, pendingScrollRef, ratioRef]);
 
   // ── load the current chapter's text ───────────────────────────────────────
 
@@ -270,7 +213,6 @@ export default function ReaderScreen() {
     if (!summary) return;
     if (chapter?.id === summary.id) return; // already on screen — do not refetch
     let cancelled = false;
-    paragraphLayoutsRef.current = new Map();
     void (async () => {
       if (cancelled) return;
       setLoadingChapter(true);
@@ -297,10 +239,12 @@ export default function ReaderScreen() {
           content: data.content,
           number: data.number,
         });
+        resetMetrics();
         chapterIdRef.current = data.id;
+        paragraphCountRef.current = splitParagraphs(data.content).length;
+        setError(null);
         setLoading(false);
-        // Web paragraphs have no layout events until they resize — give the
-        // DOM a beat, then measure and jump to whatever is pending.
+        // Retry after the virtualized list has mounted its initial rows.
         setTimeout(() => tryJumpToParagraph(), 60);
         setTimeout(() => tryJumpToParagraph(), 320);
       } catch (err) {
@@ -315,84 +259,15 @@ export default function ReaderScreen() {
     return () => {
       cancelled = true;
     };
-  }, [chapters, index, chapter?.id, tryJumpToParagraph]);
+  }, [chapters, index, chapter?.id, tryJumpToParagraph, chapterIdRef, paragraphCountRef, pendingParagraphChapterRef, pendingParagraphRef, resetMetrics]);
 
   // ── persist settings ──────────────────────────────────────────────────────
 
   useEffect(() => {
-    void AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)).catch(() => {});
-  }, [settings]);
-
-  // ── progress saving ───────────────────────────────────────────────────────
-
-  const flushProgress = useCallback(() => {
-    if (!bookId || !chapterIdRef.current) return;
-    void saveReadingProgress(bookId, chapterIdRef.current, ratioRef.current);
-  }, [bookId]);
-
-  useEffect(() => {
-    // Save the position when leaving the reader.
-    return () => {
-      if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
-      if (searchTimerRef.current !== null) clearTimeout(searchTimerRef.current);
-      if (paragraphJumpTimerRef.current !== null) clearTimeout(paragraphJumpTimerRef.current);
-      flushProgress();
-    };
-  }, [flushProgress]);
-
-  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-
-    // Ignore the scroll events our own restore/jump triggers.
-    if (suppressScrollRef.current) {
-      suppressScrollRef.current = false;
-      return;
+    if (settingsLoaded) {
+      void AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)).catch(() => {});
     }
-
-    // A real user gesture takes over — stop re-applying the saved position.
-    cancelSettle();
-    cancelParagraphJump();
-    pendingScrollRef.current = null;
-
-    const max = Math.max(1, contentSize.height - layoutMeasurement.height);
-    ratioRef.current = Math.min(1, Math.max(0, contentOffset.y / max));
-
-    const now = nowMs();
-    if (now - lastSaveRef.current > 2500) {
-      lastSaveRef.current = now;
-      if (bookId && chapterIdRef.current) {
-        void saveReadingProgress(bookId, chapterIdRef.current, ratioRef.current);
-      }
-    }
-  };
-
-  // The chapter text is one huge block — browsers and native views report a
-  // final size only after a moment. Re-apply the pending position for a short
-  // settle window so the restore sticks; any real user scroll cancels it.
-  const applyPendingScroll = () => {
-    const pending = pendingScrollRef.current;
-    if (pending === null) return;
-    if (contentHeightRef.current <= 0 || layoutHeightRef.current <= 0) return;
-
-    const max = Math.max(0, contentHeightRef.current - layoutHeightRef.current);
-    suppressScrollRef.current = true;
-    scrollRef.current?.scrollTo({ y: pending * max, animated: false });
-
-    // Keep re-applying while the layout settles, then let go — unless the
-    // user scrolls first, which cancels the timer in handleScroll.
-    if (settleTimerRef.current === null) {
-      settleTimerRef.current = setTimeout(() => {
-        settleTimerRef.current = null;
-        pendingScrollRef.current = null;
-      }, 1500);
-    }
-  };
-
-  const handleContentSize = (_width: number, height: number) => {
-    contentHeightRef.current = height;
-    applyPendingScroll();
-    tryJumpToParagraph();
-  };
+  }, [settings, settingsLoaded]);
 
   const jumpToChapter = (nextIndex: number) => {
     if (nextIndex < 0 || nextIndex >= chapters.length) return;
@@ -403,15 +278,33 @@ export default function ReaderScreen() {
     cancelParagraphJump();
     setChaptersOpen(false);
     setIndex(nextIndex);
-    scrollRef.current?.scrollTo({ y: 0, animated: false });
+    if (nextIndex === index) {
+      scrollRef.current?.scrollToOffset({ offset: 0, animated: false });
+    } else {
+      chapterIdRef.current = null;
+    }
   };
 
   // ── highlights & notes ────────────────────────────────────────────────────
 
-  const notesForParagraph = (paragraphIndex: number) =>
-    notes.filter(
-      (entry) => entry.chapter_id === chapter?.id && entry.paragraph_index === paragraphIndex,
-    );
+  const paragraphs = useMemo(() => splitParagraphs(chapter?.content ?? ''), [chapter?.content]);
+  const notesByParagraph = useMemo(() => {
+    const map = new Map<number, ReaderNote[]>();
+    for (const note of notes) {
+      if (note.chapter_id !== chapter?.id) continue;
+      const marks = map.get(note.paragraph_index) ?? [];
+      marks.push(note);
+      map.set(note.paragraph_index, marks);
+    }
+    return map;
+  }, [notes, chapter?.id]);
+
+  const openPassageActions = useCallback((paragraphIndex: number, text: string) => {
+    setActionTarget({ paragraphIndex, text });
+    setNoteMode('highlight');
+    setNoteDraft('');
+    setNoteColor('gold');
+  }, []);
 
   const tintForParagraph = (marksList: ReaderNote[]) => {
     const key = marksList[0]?.color ?? 'gold';
@@ -429,6 +322,8 @@ export default function ReaderScreen() {
     pendingParagraphChapterRef.current = note.chapter_id;
     if (target !== index) {
       flushProgress();
+      ratioRef.current = 0;
+      chapterIdRef.current = null;
       pendingScrollRef.current = null;
       cancelSettle();
       setIndex(target);
@@ -504,6 +399,10 @@ export default function ReaderScreen() {
     if (!needle || !bookId) return;
     const targetIndex = chapters.findIndex((entry) => entry.id === hit.chapter_id);
     if (targetIndex < 0) return;
+    if (targetIndex !== index) {
+      flushProgress();
+      chapterIdRef.current = null;
+    }
     ratioRef.current = 0;
     pendingScrollRef.current = null;
     cancelSettle();
@@ -517,7 +416,6 @@ export default function ReaderScreen() {
         tryJumpToParagraph();
       }
     } else {
-      flushProgress();
       pendingSearchRef.current = { chapterId: hit.chapter_id, needle };
       setIndex(targetIndex);
     }
@@ -528,8 +426,10 @@ export default function ReaderScreen() {
     if (!bookId || question.length < 4 || asking) return;
     setAsking(true);
     setAskError(null);
+    setAskAnswer(null);
     try {
-      setAskAnswer(await askBook(bookId, question));
+      const result = await askBook(bookId, question);
+      setAskAnswer({ question, result });
     } catch (err) {
       setAskError(err instanceof Error ? err.message : 'Could not answer that right now.');
     } finally {
@@ -552,9 +452,10 @@ export default function ReaderScreen() {
 
   if (!book || error || chapters.length === 0) {
     return (
-      <View style={[styles.flex, { backgroundColor: theme.bg }]}>
+      <View style={[styles.flex, { backgroundColor: theme.bg, paddingLeft: insets.left, paddingRight: insets.right }]}>
         <Stack.Screen options={{ headerShown: false }} />
-        <View style={[styles.topBar, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+        <StatusBar style={settings.theme === 'dark' ? 'light' : 'dark'} />
+        <View style={[styles.topBar, { backgroundColor: theme.chrome, borderColor: theme.border, paddingTop: insets.top + 8 }]}>
           <Pressable style={styles.iconButton} onPress={() => router.back()}>
             <Ionicons name="chevron-back" size={22} color={theme.text} />
           </Pressable>
@@ -572,18 +473,18 @@ export default function ReaderScreen() {
     );
   }
 
-  const paragraphs = splitParagraphs(chapter?.content ?? '');
   const lineHeight = Math.round(settings.fontSize * LINE_HEIGHTS[settings.spacing]);
   const serifFamily = settings.serif
     ? Platform.select({ ios: 'Georgia', android: 'serif', default: 'Georgia, serif' })
     : undefined;
 
   return (
-    <View style={[styles.flex, { backgroundColor: theme.bg }]}>
+    <View style={[styles.flex, { backgroundColor: theme.bg, paddingLeft: insets.left, paddingRight: insets.right }]}>
       <Stack.Screen options={{ headerShown: false }} />
+      <StatusBar style={settings.theme === 'dark' ? 'light' : 'dark'} />
 
       {/* Top bar */}
-      <View style={[styles.topBar, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+      <View style={[styles.topBar, { backgroundColor: theme.chrome, borderColor: theme.border, paddingTop: insets.top + 8 }]}>
         <Pressable style={styles.iconButton} onPress={() => router.back()}>
           <Ionicons name="chevron-back" size={22} color={theme.text} />
         </Pressable>
@@ -611,82 +512,73 @@ export default function ReaderScreen() {
         </Pressable>
       </View>
 
-      {/* The book text */}
-      <ScrollView
-        ref={scrollRef}
-        style={styles.flex}
-        contentContainerStyle={styles.readingContent}
-        onScroll={handleScroll}
-        scrollEventThrottle={64}
-        onContentSizeChange={handleContentSize}
-        onLayout={(event) => {
-          layoutHeightRef.current = event.nativeEvent.layout.height;
-          applyPendingScroll();
-        }}
-        showsVerticalScrollIndicator={false}
-      >
-        {loadingChapter ? (
-          <View style={styles.centerBox}>
-            <Text style={{ color: theme.muted }}>Loading chapter…</Text>
-          </View>
-        ) : (
-          <>
-            <Text
-              style={[
-                styles.chapterHeading,
-                { color: theme.text, fontFamily: serifFamily, fontSize: settings.fontSize + 8 },
-              ]}
-            >
+      {/* FlatList mounts a bounded window of paragraphs, even for long books. */}
+      {loadingChapter ? (
+        <View style={styles.centerBox}>
+          <ActivityIndicator color={theme.muted} />
+          <Text style={{ color: theme.muted }}>Loading chapter...</Text>
+        </View>
+      ) : (
+        <ReaderCellLayoutContext.Provider value={handleCellLayout}>
+        <FlatList
+          key={chapter?.id}
+          ref={scrollRef}
+          data={paragraphs}
+          CellRendererComponent={ReaderCell}
+          keyExtractor={(_paragraph, paragraphIndex) => String(paragraphIndex)}
+          initialNumToRender={6}
+          maxToRenderPerBatch={6}
+          windowSize={7}
+          style={styles.flex}
+          contentContainerStyle={styles.readingContent}
+          onScroll={handleScroll}
+          onScrollBeginDrag={handleUserScroll}
+          onTouchMove={handleUserScroll}
+          {...(Platform.OS === 'web' ? {
+            onWheel: handleUserScroll,
+            onKeyDown: (event: { key: string }) => {
+              if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' '].includes(event.key)) {
+                handleUserScroll();
+              }
+            },
+          } : {})}
+          onViewableItemsChanged={handleViewableItemsChanged}
+          viewabilityConfig={READER_VIEWABILITY}
+          scrollEventThrottle={64}
+          onContentSizeChange={handleContentSize}
+          onLayout={handleLayout}
+          onScrollToIndexFailed={handleScrollToIndexFailed}
+          showsVerticalScrollIndicator={false}
+          ListHeaderComponent={
+            <Text style={[styles.chapterHeading, {
+              color: theme.text, fontFamily: serifFamily, fontSize: settings.fontSize + 8,
+            }]}>
               {chapter?.title ?? `Chapter ${index + 1}`}
             </Text>
-            {paragraphs.map((paragraph, paragraphIndex) => {
-              const marks = notesForParagraph(paragraphIndex);
-              const highlighted = marks.some((entry) => entry.kind === 'highlight');
-              const noted = marks.some((entry) => entry.kind === 'note');
-              return (
-                <Pressable
-                  key={paragraphIndex}
-                  {...(Platform.OS === 'web'
-                    ? { dataSet: { pidx: String(paragraphIndex) } }
-                    : {})}
-                  onLongPress={() => {
-                    setActionTarget({ paragraphIndex, text: paragraph });
-                    setNoteMode('highlight');
-                    setNoteDraft('');
-                    setNoteColor('gold');
-                  }}
-                  delayLongPress={350}
-                  onLayout={(event) => {
-                    paragraphLayoutsRef.current.set(paragraphIndex, event.nativeEvent.layout.y);
-                    tryJumpToParagraph();
-                  }}
-                  style={
-                    highlighted
-                      ? [styles.highlightedParagraph, { backgroundColor: tintForParagraph(marks) }]
-                      : undefined
-                  }
-                >
-                  <Text
-                    style={{
-                      color: theme.text,
-                      fontFamily: serifFamily,
-                      fontSize: settings.fontSize,
-                      lineHeight,
-                      marginBottom: Math.round(lineHeight * 0.55),
-                    }}
-                  >
-                    {paragraph}
-                    {noted ? '  📝' : ''}
-                  </Text>
-                </Pressable>
-              );
-            })}
-
+          }
+          renderItem={({ item: paragraph, index: paragraphIndex }) => {
+            const marks = notesByParagraph.get(paragraphIndex) ?? [];
+            const highlights = marks.filter((entry) => entry.kind === 'highlight');
+            return (
+              <ReaderParagraph
+                text={paragraph}
+                index={paragraphIndex}
+                color={theme.text}
+                tint={highlights.length ? tintForParagraph(highlights) : undefined}
+                noted={marks.some((entry) => entry.kind === 'note')}
+                fontFamily={serifFamily}
+                fontSize={settings.fontSize}
+                lineHeight={lineHeight}
+                onLongPress={openPassageActions}
+              />
+            );
+          }}
+          ListFooterComponent={
             <View style={[styles.chapterEnd, { borderColor: theme.border }]}>
               <Text style={{ color: theme.muted, marginBottom: spacing.md }}>
                 {index + 1 < chapters.length
-                  ? `End of “${chapter?.title ?? ''}”`
-                  : 'You finished the last chapter 🎉'}
+                  ? `End of \u201c${chapter?.title ?? ''}\u201d`
+                  : 'You finished the last chapter \ud83c\udf89'}
               </Text>
               {index + 1 < chapters.length ? (
                 <Pressable
@@ -700,12 +592,13 @@ export default function ReaderScreen() {
                 </Pressable>
               ) : null}
             </View>
-          </>
-        )}
-      </ScrollView>
+          }
+        />
+        </ReaderCellLayoutContext.Provider>
+      )}
 
       {/* Bottom chapter bar */}
-      <View style={[styles.bottomBar, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+      <View style={[styles.bottomBar, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 8 }]}>
         <Pressable
           style={[styles.navButton, index === 0 && styles.navDisabled]}
           disabled={index === 0}
@@ -740,7 +633,7 @@ export default function ReaderScreen() {
       {/* Settings sheet */}
       <Modal visible={settingsOpen} transparent animationType="slide" onRequestClose={() => setSettingsOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setSettingsOpen(false)} />
-        <View style={[styles.sheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+        <View style={[styles.sheet, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 20, paddingLeft: Math.max(insets.left, 20), paddingRight: Math.max(insets.right, 20) }]}>
           <Text style={[styles.sheetTitle, { color: theme.text }]}>Reading settings</Text>
 
           <Text style={[styles.settingLabel, { color: theme.muted }]}>Theme</Text>
@@ -845,7 +738,7 @@ export default function ReaderScreen() {
       {/* Chapter drawer */}
       <Modal visible={chaptersOpen} transparent animationType="slide" onRequestClose={() => setChaptersOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setChaptersOpen(false)} />
-        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 20, paddingLeft: Math.max(insets.left, 20), paddingRight: Math.max(insets.right, 20) }]}>
           <Text style={[styles.sheetTitle, { color: theme.text }]}>Chapters</Text>
           <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
             {chapters.map((entry, entryIndex) => {
@@ -879,7 +772,7 @@ export default function ReaderScreen() {
         onRequestClose={() => setActionTarget(null)}
       >
         <Pressable style={styles.modalBackdrop} onPress={() => setActionTarget(null)} />
-        <View style={[styles.sheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+        <View style={[styles.sheet, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 20, paddingLeft: Math.max(insets.left, 20), paddingRight: Math.max(insets.right, 20) }]}>
           <Text style={[styles.sheetTitle, { color: theme.text }]}>
             {noteMode === 'note' ? 'Add a note' : 'Save this passage'}
           </Text>
@@ -962,7 +855,7 @@ export default function ReaderScreen() {
       {/* In-book search */}
       <Modal visible={searchOpen} transparent animationType="slide" onRequestClose={() => setSearchOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setSearchOpen(false)} />
-        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 20, paddingLeft: Math.max(insets.left, 20), paddingRight: Math.max(insets.right, 20) }]}>
           <View style={styles.modeRow}>
             <Pressable
               style={[
@@ -1039,7 +932,12 @@ export default function ReaderScreen() {
             <>
               <TextInput
                 value={askQuestion}
-                onChangeText={setAskQuestion}
+                onChangeText={(text) => {
+                  setAskQuestion(text);
+                  setAskAnswer(null);
+                  setAskError(null);
+                }}
+                editable={!asking}
                 placeholder="e.g. How does the cardiac cycle relate to the ECG?"
                 placeholderTextColor={theme.muted}
                 multiline
@@ -1063,13 +961,16 @@ export default function ReaderScreen() {
               ) : null}
               {askAnswer && !asking ? (
                 <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
-                  <Text style={{ color: theme.text, lineHeight: 22, marginTop: 4 }}>
-                    {askAnswer.answer}
+                  <Text style={{ color: theme.muted, fontWeight: '700', marginBottom: 8 }}>
+                    Asked: {askAnswer.question}
                   </Text>
-                  {askAnswer.sources.length > 0 ? (
+                  <Text style={{ color: theme.text, lineHeight: 22, marginTop: 4 }}>
+                    {askAnswer.result.answer}
+                  </Text>
+                  {askAnswer.result.sources.length > 0 ? (
                     <View style={styles.sourceRow}>
                       <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>From</Text>
-                      {askAnswer.sources.map((source) => (
+                      {askAnswer.result.sources.map((source) => (
                         <Pressable
                           key={source.chapter_id}
                           style={[styles.sourceChip, { borderColor: theme.border }]}
@@ -1101,7 +1002,7 @@ export default function ReaderScreen() {
       {/* Notes & highlights drawer */}
       <Modal visible={notesOpen} transparent animationType="slide" onRequestClose={() => setNotesOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setNotesOpen(false)} />
-        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
+        <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 20, paddingLeft: Math.max(insets.left, 20), paddingRight: Math.max(insets.right, 20) }]}>
           <View style={styles.drawerHeader}>
             <Text style={[styles.sheetTitle, { color: theme.text }]}>
               Notes & highlights{notes.length > 0 ? ` (${notes.length})` : ''}
@@ -1190,7 +1091,7 @@ const styles = StyleSheet.create({
   topBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingTop: Platform.select({ ios: 52, default: 34 }),
+    paddingTop: 8,
     paddingBottom: 10,
     paddingHorizontal: 8,
     borderBottomWidth: StyleSheet.hairlineWidth,
@@ -1224,7 +1125,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 10,
-    paddingBottom: Platform.select({ ios: 26, default: 10 }),
+    paddingBottom: 8,
     paddingTop: 8,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
@@ -1238,7 +1139,7 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 20,
     borderWidth: StyleSheet.hairlineWidth,
     padding: 20,
-    paddingBottom: Platform.select({ ios: 36, default: 22 }),
+    paddingBottom: 20,
     gap: 10,
   },
   chapterSheet: { maxHeight: '70%' },

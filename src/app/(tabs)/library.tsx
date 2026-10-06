@@ -96,6 +96,13 @@ export default function LibraryScreen() {
               <View style={styles.titleActions}>
                 <Pressable
                   style={styles.notesLink}
+                  onPress={() => router.push('/decks')}
+                  accessibilityLabel="Review decks"
+                >
+                  <Ionicons name="albums-outline" size={18} color={colors.primary} />
+                </Pressable>
+                <Pressable
+                  style={styles.notesLink}
                   onPress={() => router.push('/notes')}
                   accessibilityLabel="My notes"
                 >

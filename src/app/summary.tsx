@@ -6,6 +6,7 @@ import { useCallback, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
+import { LoadError } from '@/components/LoadError';
 import { Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { generateStudyKit } from '@/lib/api';
 import { api } from '@/lib/apiClient';
@@ -23,7 +24,11 @@ export default function SummaryScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    if (!chapterId) return;
+    if (!chapterId) {
+      setError('No chapter was selected.');
+      setLoading(false);
+      return;
+    }
 
     try {
       const [materials, chapter] = await Promise.all([
@@ -62,6 +67,15 @@ export default function SummaryScreen() {
 
   if (loading) {
     return <LoadingView label="Loading summary…" />;
+  }
+
+  if (error && !material?.content.overview) {
+    return (
+      <Screen>
+        <Stack.Screen options={{ title: 'Chapter summary' }} />
+        <LoadError message={error} onRetry={() => { setLoading(true); void load(); }} />
+      </Screen>
+    );
   }
 
   if (!material?.content.overview) {

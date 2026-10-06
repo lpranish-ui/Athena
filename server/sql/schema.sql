@@ -328,3 +328,54 @@ create index if not exists reader_notes_book_idx on reader_notes (user_id, book_
 
 -- Highlight colors (gold default; older rows keep gold automatically).
 alter table reader_notes add column if not exists color text not null default 'gold';
+
+-- ----------------------------------------------------------------------------
+-- flashcard decks with per-card spaced repetition state (per student)
+-- ----------------------------------------------------------------------------
+create table if not exists flashcards (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users (id) on delete cascade,
+  book_id uuid not null references books (id) on delete cascade,
+  chapter_id uuid references chapters (id) on delete set null,
+  front text not null,
+  back text not null,
+  topic text,
+  stability real not null default 0,
+  difficulty real not null default 5,
+  reps int not null default 0,
+  lapses int not null default 0,
+  due_at timestamptz not null default now(),
+  last_reviewed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists flashcards_due_idx on flashcards (user_id, due_at);
+create index if not exists flashcards_book_idx on flashcards (user_id, book_id);
+
+-- Indexed lexical retrieval for Ask this book.
+create index if not exists chapters_search_tsv_idx on chapters using gin (to_tsvector('english', content));
+
+-- Durable uploads: byte offsets make network retries idempotent, and leases let
+-- another container resume processing after a deploy without external storage.
+create table if not exists upload_sessions (
+  book_id uuid primary key references books(id) on delete cascade,
+  user_id uuid not null references users(id) on delete cascade,
+  expected_size bigint check (expected_size > 0),
+  received_bytes bigint not null default 0 check (received_bytes >= 0),
+  status text not null default 'uploading' check (status in ('uploading','queued','processing','done','error')),
+  attempts int not null default 0,
+  lease_token uuid,
+  lease_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+create index if not exists upload_sessions_queue_idx on upload_sessions(status,updated_at);
+create index if not exists upload_sessions_user_idx on upload_sessions(user_id,status);
+create table if not exists upload_chunks (
+  book_id uuid not null references upload_sessions(book_id) on delete cascade,
+  byte_offset bigint not null check (byte_offset >= 0),
+  byte_length int not null check (byte_length > 0),
+  sha256 text not null,
+  data bytea not null,
+  primary key (book_id,byte_offset),
+  check (octet_length(data) = byte_length)
+);

@@ -5,10 +5,12 @@
 
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
+import { LoadError } from '@/components/LoadError';
+import { useQuizClock } from '@/hooks/useQuizClock';
 import { Badge, Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { flagQuestion, replaceQuestion } from '@/lib/api';
 import { api } from '@/lib/apiClient';
@@ -174,11 +176,15 @@ export default function QuizScreen() {
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [answers, setAnswers] = useState<number[]>([]);
-  const [elapsed, setElapsed] = useState(0);
+  const { elapsed, getElapsed, resetElapsed } = useQuizClock(phase === 'running');
   const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
-    if (!id) return;
+    if (!id) {
+      setError('No quiz was selected.');
+      setLoading(false);
+      return;
+    }
 
     try {
       const data = await api.get<{
@@ -212,13 +218,6 @@ export default function QuizScreen() {
     }, [load]),
   );
 
-  // Running timer (exam duration).
-  useEffect(() => {
-    if (phase !== 'running') return;
-    const timer = setInterval(() => setElapsed((value) => value + 1), 1000);
-    return () => clearInterval(timer);
-  }, [phase]);
-
   const current = mcqs[index];
   const revealed = mode === 'tutor' && selected !== null;
   const isLast = index + 1 >= mcqs.length;
@@ -250,7 +249,7 @@ export default function QuizScreen() {
         total: mcqs.length,
         answers,
         mode,
-        duration_seconds: elapsed,
+        duration_seconds: getElapsed(),
       });
     } catch (err) {
       setError(
@@ -305,13 +304,22 @@ export default function QuizScreen() {
     setIndex(0);
     setSelected(null);
     setAnswers([]);
-    setElapsed(0);
+    resetElapsed();
     setPhase('intro');
     setError(null);
   };
 
   if (loading) {
     return <LoadingView label="Loading quiz…" />;
+  }
+
+  if (error && mcqs.length === 0) {
+    return (
+      <Screen>
+        <Stack.Screen options={{ title: 'Quiz' }} />
+        <LoadError message={error} onRetry={() => { setLoading(true); void load(); }} />
+      </Screen>
+    );
   }
 
   if (mcqs.length === 0) {

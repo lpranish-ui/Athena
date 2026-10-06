@@ -1,4 +1,2 @@
-supabase>=2.10
-python-dotenv>=1.0
 pypdfium2>=4.30
 ocrmypdf>=16.0

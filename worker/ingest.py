@@ -1,27 +1,21 @@
-"""Book ingestion for the Athena worker.
+"""Local PDF extraction and chapter diagnostics for Athena.
 
-Extracts text from PDFs page by page and splits them into chapters — the same
-pipeline as the `ingest-book` edge function, but able to run OCR (OCRmyPDF +
-Tesseract) for scanned books, which the edge runtime cannot do.
-
-Processes `ingest_book` jobs queued in the `jobs` table by the app.
+Uses the same chapter/page-map conventions as the Node API. OCR is optional;
+database job processing and ownership checks belong to the API.
 """
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import subprocess
 import tempfile
 
-import pypdfium2 as pdfium
-
-MAX_TOTAL_CHARS = 1_200_000
+MAX_TOTAL_CHARS = 6_000_000
 MIN_TEXT_LENGTH = 100
 MAX_CHAPTERS = 120
 FALLBACK_CHARS_PER_PART = 9000
-SCAN_TEXT_THRESHOLD = 500  # fewer characters than this means the PDF is a scan
+SCAN_TEXT_THRESHOLD = MIN_TEXT_LENGTH
 
 HEADING_RE = re.compile(
     r"^[ \t]*(?:chapter|unit|section|part)\s+([0-9]{1,3}|[ivxlcdm]{1,7})\b[\s:.\-–—]*(.{0,80})$",
@@ -29,55 +23,17 @@ HEADING_RE = re.compile(
 )
 
 
-class DuplicateUpload(RuntimeError):
-    """Raised when the same file has already been uploaded by this user."""
-
-
 # ── job entry point ──────────────────────────────────────────────────────────
 
-def process_ingest_job(client, job) -> dict:
-    payload = job.get("payload") or {}
-    book_id = payload.get("bookId")
-    if not book_id:
-        raise RuntimeError("Job has no bookId in its payload.")
-
-    book = client.table("books").select("*").eq("id", book_id).single().execute().data
-    if not book:
-        raise RuntimeError(f"Book {book_id} not found.")
-    if book.get("file_type") != "pdf" or not book.get("file_path"):
-        raise RuntimeError("The worker only processes PDF uploads.")
-
-    client.table("books").update({"status": "processing"}).eq("id", book_id).execute()
-
-    raw: bytes = client.storage.from_("books").download(book["file_path"])
-    file_hash = hashlib.sha256(raw).hexdigest()
-
-    duplicate = (
-        client.table("books")
-        .select("id, title")
-        .eq("owner_id", book["owner_id"])
-        .eq("file_hash", file_hash)
-        .neq("id", book_id)
-        .limit(1)
-        .execute()
-        .data
-    )
-    if duplicate:
-        raise DuplicateUpload(
-            f'You have already uploaded this file as "{duplicate[0]["title"]}". '
-            "Delete that copy first if you want to re-upload it."
-        )
-
+def process_pdf(pdf_path: str, *, run_ocr: bool = False) -> dict:
+    """Extract locally; the API owns upload persistence and job retries."""
     with tempfile.TemporaryDirectory() as tmp:
-        pdf_path = os.path.join(tmp, "input.pdf")
-        with open(pdf_path, "wb") as handle:
-            handle.write(raw)
-
         lines = _extract_lines(pdf_path)
         text_length = sum(len(line["text"]) for line in lines)
 
         if text_length < SCAN_TEXT_THRESHOLD:
-            print("   …no text layer found — running OCR (this can take a while)")
+            if not run_ocr:
+                raise RuntimeError("This PDF needs OCR. Install OCRmyPDF/Tesseract and pass --ocr.")
             ocr_path = os.path.join(tmp, "ocr.pdf")
             _run_ocr(pdf_path, ocr_path)
             lines = _extract_lines(ocr_path)
@@ -87,48 +43,19 @@ def process_ingest_job(client, job) -> dict:
 
     total_chars = sum(len(line["text"]) + 1 for line in lines)
     if total_chars > MAX_TOTAL_CHARS:
-        kept: list[dict] = []
-        accumulated = 0
-        for line in lines:
-            accumulated += len(line["text"]) + 1
-            if accumulated > MAX_TOTAL_CHARS:
-                break
-            kept.append(line)
-        lines = kept
+        raise RuntimeError("Extracted text exceeds the limit; split the PDF into smaller volumes.")
 
     chapters = _split_into_chapters(lines)
     if not chapters:
         raise RuntimeError("No chapters could be built from this PDF.")
 
-    # Replace any previous splits (retry safety) and store the new ones.
-    client.table("chapters").delete().eq("book_id", book_id).execute()
-
-    for start in range(0, len(chapters), 5):
-        batch = []
-        for offset, chapter in enumerate(chapters[start : start + 5]):
-            batch.append(
-                {
-                    "book_id": book_id,
-                    "number": start + offset + 1,
-                    "title": chapter["title"] or f"Chapter {start + offset + 1}",
-                    "content": chapter["content"],
-                    "first_page": chapter["first_page"],
-                    "last_page": chapter["last_page"],
-                    "page_map": chapter["page_map"] or None,
-                }
-            )
-        client.table("chapters").insert(batch).execute()
-
-    client.table("books").update(
-        {"status": "ready", "status_message": None, "file_hash": file_hash}
-    ).eq("id", book_id).execute()
-
-    return {"chapters": len(chapters)}
+    return {"chapters": chapters}
 
 
 # ── PDF text extraction ──────────────────────────────────────────────────────
 
 def _extract_lines(pdf_path: str) -> list[dict]:
+    import pypdfium2 as pdfium  # optional; pure tests need no native tools
     pdf = pdfium.PdfDocument(pdf_path)
     lines: list[dict] = []
     try:
@@ -166,6 +93,7 @@ def _run_ocr(input_path: str, output_path: str) -> None:
             check=True,
             capture_output=True,
             text=True,
+            timeout=600,
         )
     except FileNotFoundError as err:
         raise RuntimeError(
@@ -175,6 +103,8 @@ def _run_ocr(input_path: str, output_path: str) -> None:
     except subprocess.CalledProcessError as err:
         detail = (err.stderr or err.stdout or "").strip().replace("\n", " ")[:300]
         raise RuntimeError(f"OCR failed: {detail}") from err
+    except subprocess.TimeoutExpired as err:
+        raise RuntimeError("OCR exceeded the ten-minute processing limit.") from err
 
 
 # ── chapter splitting (port of the edge-function pipeline) ───────────────────
@@ -288,6 +218,7 @@ def _build_drafts_from_starts(lines: list[dict], starts: list[tuple[str, int]]):
         return None
 
     drafts: list[dict] = []
+    starts = starts[:MAX_CHAPTERS]
     for i, (title, page) in enumerate(starts):
         if i >= MAX_CHAPTERS:
             break
@@ -301,7 +232,7 @@ def _build_drafts_from_starts(lines: list[dict], starts: list[tuple[str, int]]):
         drafts.append(_to_draft(title or f"Chapter {i + 1}", segment))
 
     usable = [draft for draft in drafts if len(draft["content"]) >= MIN_TEXT_LENGTH]
-    return usable if len(usable) >= 2 else None
+    return drafts if len(usable) >= 2 else None
 
 
 def _chapters_from_toc(lines: list[dict]) -> list[dict] | None:
@@ -374,7 +305,7 @@ def _split_into_chapters(lines: list[dict]) -> list[dict]:
     if 2 <= len(candidates) <= 60:
         segments: list[dict] = []
         for i, (line_index, title) in enumerate(candidates[:MAX_CHAPTERS]):
-            start = line_index + 1
+            start = 0 if i == 0 else line_index
             end = candidates[i + 1][0] if i + 1 < len(candidates) else len(lines)
             segments.append(_to_draft(title, lines[start:end]))
 
@@ -382,14 +313,18 @@ def _split_into_chapters(lines: list[dict]) -> list[dict]:
         for segment in segments:
             if merged and len(segment["content"]) < 300:
                 previous = merged[-1]
-                previous["content"] = (
-                    previous["content"] + "\n" + segment["title"] + "\n" + segment["content"]
-                ).strip()
+                offset = len(previous["content"]) + 1
+                previous["content"] += "\n" + segment["content"]
+                previous["page_map"].extend(
+                    {"page": mark["page"], "char_start": offset + mark["char_start"]}
+                    for mark in segment["page_map"]
+                )
+                previous["last_page"] = segment["last_page"] or previous["last_page"]
             else:
                 merged.append(segment)
 
         usable = [segment for segment in merged if len(segment["content"]) >= MIN_TEXT_LENGTH]
         if len(usable) >= 2:
-            return usable
+            return [segment for segment in merged if segment["content"]]
 
     return _chunk_fallback(lines)

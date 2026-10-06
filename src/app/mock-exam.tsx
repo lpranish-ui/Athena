@@ -19,7 +19,7 @@ interface BookOption {
   id: string;
   title: string;
   subject: string;
-  questionIds: string[];
+  count: number;
 }
 
 /** A question row as returned by GET /api/mcqs. */
@@ -43,7 +43,6 @@ interface QuestionFull {
 export default function MockExamScreen() {
   const router = useRouter();
 
-  const [allQuestions, setAllQuestions] = useState<QuestionFull[]>([]);
   const [books, setBooks] = useState<BookOption[]>([]);
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null);
   const [count, setCount] = useState<number>(20);
@@ -53,26 +52,11 @@ export default function MockExamScreen() {
 
   const load = useCallback(async () => {
     try {
-      const rows = await api.get<QuestionFull[]>('/api/mcqs?limit=500');
-      setAllQuestions(rows);
+      const list = await api.get<BookOption[]>('/api/mcqs/books');
       setError(null);
-
-      const grouped = new Map<string, BookOption>();
-      for (const row of rows) {
-        if (!row.book_id || !row.book_title) continue;
-        const entry = grouped.get(row.book_id) ?? {
-          id: row.book_id,
-          title: row.book_title,
-          subject: row.book_subject ?? 'General',
-          questionIds: [],
-        };
-        entry.questionIds.push(row.id);
-        grouped.set(row.book_id, entry);
-      }
-
-      const list = [...grouped.values()].sort((a, b) => b.questionIds.length - a.questionIds.length);
       setBooks(list);
-      setSelectedBookId(list[0]?.id ?? null);
+      setSelectedBookId((previous) => list.some((book) => book.id === previous)
+        ? previous : (list[0]?.id ?? null));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load your questions.');
     }
@@ -93,14 +77,17 @@ export default function MockExamScreen() {
     setBusy(true);
     setError(null);
     try {
-      // Sample questions across the book (shuffled).
-      const shuffled = [...book.questionIds].sort(() => Math.random() - 0.5);
-      const sampled = shuffled.slice(0, Math.min(count, shuffled.length));
-
-      const byId = new Map(allQuestions.map((row) => [row.id, row]));
-      const copies = sampled
-        .map((questionId) => byId.get(questionId))
-        .filter((row): row is QuestionFull => row !== undefined)
+      // Fetch this book at build time so other books cannot crowd it out.
+      const questions = await api.get<QuestionFull[]>(
+        `/api/mcqs?book_id=${encodeURIComponent(book.id)}&limit=${count}&sample=true`,
+      );
+      // Fisher–Yates gives every question an equal chance of being selected.
+      const shuffled = [...questions];
+      for (let index = shuffled.length - 1; index > 0; index--) {
+        const target = Math.floor(Math.random() * (index + 1));
+        [shuffled[index], shuffled[target]] = [shuffled[target], shuffled[index]];
+      }
+      const copies = shuffled.slice(0, Math.min(count, shuffled.length))
         .map((row) => ({
           question: row.question,
           options: row.options,
@@ -185,7 +172,7 @@ export default function MockExamScreen() {
                           {book.title}
                         </Text>
                         <Text style={styles.bookMeta}>
-                          {book.subject} · {book.questionIds.length} questions available
+                          {book.subject} · {book.count} questions available
                         </Text>
                       </View>
                       {active ? (
@@ -220,16 +207,16 @@ export default function MockExamScreen() {
                   );
                 })}
               </View>
-              {selectedBook && selectedBook.questionIds.length < count ? (
+              {selectedBook && selectedBook.count < count ? (
                 <Text style={styles.hint}>
-                  This book only has {selectedBook.questionIds.length} questions — the exam will use
+                  This book only has {selectedBook.count} questions — the exam will use
                   all of them.
                 </Text>
               ) : null}
             </Card>
 
             <Button
-              label={selectedBook ? `Start mock exam (${Math.min(count, selectedBook.questionIds.length)} questions)` : 'Start mock exam'}
+              label={selectedBook ? `Start mock exam (${Math.min(count, selectedBook.count)} questions)` : 'Start mock exam'}
               icon="play-outline"
               onPress={() => void start()}
               loading={busy}

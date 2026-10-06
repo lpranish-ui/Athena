@@ -114,8 +114,12 @@ export default function GroupRoomScreen() {
           // Deep link / reopened app: join the room again, then keep polling.
           try {
             await api.post(`/api/group/rooms/${code}/join`, {});
-          } catch {
-            // fall through to the normal error handling below
+          } catch (joinError) {
+            if (!cancelled) {
+              setError(joinError instanceof Error ? joinError.message : 'Could not join this game.');
+            }
+            // A finished/missing room will not recover through further polling.
+            if (joinError instanceof ApiError && [403, 404, 409].includes(joinError.status)) return;
           }
         } else {
           setError(err instanceof Error ? err.message : 'Could not reach the game.');

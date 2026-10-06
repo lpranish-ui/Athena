@@ -1,13 +1,13 @@
 // File picking + upload helpers that work on web, Android and iOS.
 //
 // The picked file is sent straight to the API, which extracts the text and
-// chapters. Nothing is stored server-side afterwards.
+// chapters. Durable server chunks are removed after processing.
 
 import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-import { api, apiRequest } from './apiClient';
+import { api, apiRequest, ApiError } from './apiClient';
 
 export type FileKind = 'pdf' | 'epub' | 'txt';
 
@@ -39,6 +39,7 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
     type: [MIME_TYPES.pdf, MIME_TYPES.epub, MIME_TYPES.txt],
     copyToCacheDirectory: true,
     multiple: false,
+    base64: false,
   });
 
   if (result.canceled || !result.assets?.length) return null;
@@ -58,7 +59,7 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
   };
 }
 
-const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per request — any file size works
+const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per request
 
 export interface UploadProgress {
   phase: 'uploading' | 'processing';
@@ -110,13 +111,16 @@ async function readChunk(picked: PickedBookFile, start: number, end: number): Pr
     // Random access is not available for this file provider — fall back to
     // reading the whole file (fine for small books).
   }
+  if ((file.size ?? picked.size ?? Infinity) > CHUNK_SIZE) {
+    throw new Error('This file provider does not support streaming. Save the book to this device and pick the local copy.');
+  }
   const all = await file.bytes();
   return all.slice(start, end);
 }
 
 /**
- * Uploads a book file of ANY size: creates the book, streams it to the API
- * in 8 MB chunks (flat memory on phone and server), then hands it to the
+ * Uploads a book file within the server's configured limit (512 MB by default):
+ * creates the book, streams it in 8 MB chunks with bounded phone memory, then hands it to the
  * server-side extractor. `onProgress` fires after every chunk and once when
  * processing starts.
  */
@@ -139,6 +143,7 @@ export async function uploadBookFile(
     title: options.title,
     subject: options.subject,
     author: options.author,
+    fileSize: totalBytes,
   });
   const bookId = started.bookId;
 
@@ -147,28 +152,58 @@ export async function uploadBookFile(
     while (sent < totalBytes) {
       const end = Math.min(sent + CHUNK_SIZE, totalBytes);
       const chunk = await readChunk(picked, sent, end);
+      if (chunk.byteLength !== end - sent) {
+        throw new Error('The selected file could not be read completely. Pick it again and retry.');
+      }
       // Send an exact-length ArrayBuffer — most compatible body type across
       // react-native and browser fetch implementations.
       const body = chunk.buffer.slice(
         chunk.byteOffset,
         chunk.byteOffset + chunk.byteLength,
       ) as ArrayBuffer;
-      await apiRequest<{ received: number }>('PUT', `/api/uploads/${bookId}/chunk`, {
-        raw: body,
-        headers: { 'Content-Type': 'application/octet-stream' },
-        timeoutMs: 120000,
-      });
+      let accepted = false;
+      for (let attempt = 0; attempt < 3 && !accepted; attempt++) {
+        try {
+          const result = await apiRequest<{ received: number }>('PUT', `/api/uploads/${bookId}/chunk`, {
+            raw: body,
+            headers: { 'Content-Type': 'application/octet-stream', 'x-upload-offset': String(sent) },
+            timeoutMs: 120000,
+          });
+          if (result.received !== end) throw new Error('The server received an unexpected amount of data. Retry the upload.');
+          accepted = true;
+        } catch (error) {
+          if (!(error instanceof ApiError) || ![0, 409, 502, 503, 504].includes(error.status)) throw error;
+          // A lost response may mean the chunk was already committed. Ask before retrying.
+          const state = await api.get<{ received: number }>(`/api/uploads/${bookId}`).catch(() => null);
+          if (state?.received === end) {
+            accepted = true;
+          } else if (state && state.received !== sent) {
+            throw new Error('The server upload position changed. Pick the file again and retry.');
+          } else if (attempt === 2) {
+            throw error;
+          } else {
+            await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+          }
+        }
+      }
       sent = end;
       options.onProgress?.({ phase: 'uploading', sentBytes: sent, totalBytes });
     }
 
-    await api.post(`/api/uploads/${bookId}/finish`, { size: sent });
+    try {
+      await api.post(`/api/uploads/${bookId}/finish`, { size: sent });
+    } catch (error) {
+      const book = await api.get<{ status: string; status_message: string | null }>(`/api/books/${bookId}`).catch(() => null);
+      if (!book || book.status === 'error' || book.status_message === 'Uploading…') throw error;
+    }
     options.onProgress?.({ phase: 'processing', sentBytes: sent, totalBytes });
     return { bookId };
   } catch (error) {
     // Leave nothing behind on the server when a chunk fails.
     await api.del(`/api/books/${bookId}`).catch(() => {});
     throw error;
+  } finally {
+    webBlobCache = null;
   }
 }
 

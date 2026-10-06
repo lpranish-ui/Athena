@@ -15,7 +15,15 @@
 
 import crypto from 'node:crypto';
 
-import { many, one, query, withTransaction } from './db.js';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import * as defaultDatabase from './db.js';
+
+const requestDatabase = new AsyncLocalStorage();
+const activeDatabase = () => requestDatabase.getStore() ?? defaultDatabase;
+const one = (...args) => activeDatabase().one(...args);
+const many = (...args) => activeDatabase().many(...args);
+const query = (...args) => activeDatabase().query(...args);
+const withTransaction = (...args) => activeDatabase().withTransaction(...args);
 import { HttpError } from './http.js';
 
 export const QUESTION_MS = 25_000; // time to answer each question
@@ -40,17 +48,31 @@ export function pointsFor(elapsedMs) {
   return BASE_POINTS + Math.max(0, MAX_SPEED_BONUS - seconds);
 }
 
-function wrap(handler) {
+/** Lock a room for the entire request, and commit before publishing its state. */
+function wrap(database, handler) {
   return async (req, res) => {
     try {
-      await handler(req, res);
+      let status=200;
+      let body;
+      const response={status(value) { status=value; return this; },json(value) { body=value; return this; }};
+      await database.withTransaction(async (client) => {
+        if (req.params.code) {
+          await client.query('select id from group_rooms where code=$1 for update',
+            [String(req.params.code).toUpperCase().trim()]);
+        }
+        const scoped={
+          query:(...args)=>client.query(...args),
+          one:async (...args)=>(await client.query(...args)).rows[0] ?? null,
+          many:async (...args)=>(await client.query(...args)).rows,
+          withTransaction:async (fn)=>fn(client),
+        };
+        await requestDatabase.run(scoped,()=>handler(req,response));
+      });
+      res.status(status).json(body);
     } catch (error) {
-      if (error instanceof HttpError) {
-        res.status(error.status).json({ error: error.message });
-        return;
-      }
+      if (error instanceof HttpError) { res.status(error.status).json({error:error.message}); return; }
       console.error('group route failed:', error instanceof Error ? error.message : error);
-      res.status(500).json({ error: 'Unexpected server error.' });
+      res.status(500).json({ error:'Unexpected server error.' });
     }
   };
 }
@@ -264,11 +286,11 @@ async function displayNameFor(userId, override) {
 
 // ── routes ───────────────────────────────────────────────────────────────────
 
-export function registerGroupRoutes(app) {
+export function registerGroupRoutes(app, { database = defaultDatabase } = {}) {
   /** Creates a room for one of the caller's quiz sets. */
   app.post(
     '/api/group/rooms',
-    wrap(async (req, res) => {
+    wrap(database, async (req, res) => {
       const setId = String(req.body?.setId ?? '');
       const set = await one('select * from mcq_sets where id = $1', [setId]);
       if (!set || set.user_id !== req.user.id) {
@@ -290,7 +312,7 @@ export function registerGroupRoutes(app) {
         try {
           room = await one(
             `insert into group_rooms (code, host_id, set_id, title, question_count)
-             values ($1, $2, $3, $4, $5) returning *`,
+             values ($1, $2, $3, $4, $5) on conflict (code) do nothing returning *`,
             [makeCode(), req.user.id, setId, set.title ?? 'Group quiz', counted.count],
           );
         } catch (error) {
@@ -312,7 +334,7 @@ export function registerGroupRoutes(app) {
   /** Joins a room by code (also lets a player update their display name). */
   app.post(
     '/api/group/rooms/:code/join',
-    wrap(async (req, res) => {
+    wrap(database, async (req, res) => {
       const room = await roomByCode(req.params.code);
       if (!room) throw new HttpError(404, 'No game found with that code.');
       if (room.status === 'finished') throw new HttpError(409, 'That game has already finished.');
@@ -331,7 +353,7 @@ export function registerGroupRoutes(app) {
   /** The room state every client polls (fast: ~1s during questions). */
   app.get(
     '/api/group/rooms/:code',
-    wrap(async (req, res) => {
+    wrap(database, async (req, res) => {
       const room = await roomByCode(req.params.code);
       if (!room) throw new HttpError(404, 'No game found with that code.');
       const player = await playerFor(room.id, req.user.id);
@@ -343,7 +365,7 @@ export function registerGroupRoutes(app) {
   /** Host starts the game from the lobby. */
   app.post(
     '/api/group/rooms/:code/start',
-    wrap(async (req, res) => {
+    wrap(database, async (req, res) => {
       const room = await roomByCode(req.params.code);
       if (!room) throw new HttpError(404, 'No game found with that code.');
       if (room.host_id !== req.user.id) throw new HttpError(403, 'Only the host can start the game.');
@@ -362,7 +384,7 @@ export function registerGroupRoutes(app) {
   /** Host advances early from the reveal screen (or the timer does it). */
   app.post(
     '/api/group/rooms/:code/next',
-    wrap(async (req, res) => {
+    wrap(database, async (req, res) => {
       let room = await roomByCode(req.params.code);
       if (!room) throw new HttpError(404, 'No game found with that code.');
       if (room.host_id !== req.user.id) {
@@ -383,7 +405,7 @@ export function registerGroupRoutes(app) {
   /** Submit an answer for the current question (first answer counts). */
   app.post(
     '/api/group/rooms/:code/answer',
-    wrap(async (req, res) => {
+    wrap(database, async (req, res) => {
       const room = await roomByCode(req.params.code);
       if (!room) throw new HttpError(404, 'No game found with that code.');
       const player = await playerFor(room.id, req.user.id);
@@ -411,6 +433,7 @@ export function registerGroupRoutes(app) {
 
       const row = await questionAt(advanced.set_id, questionIndex);
       if (!row) throw new HttpError(404, 'Question not found.');
+      if (!Array.isArray(row.options) || optionIndex >= row.options.length) throw new HttpError(400, 'Choose one of the question options.');
 
       const elapsedMs = Math.max(
         0,
@@ -444,7 +467,7 @@ export function registerGroupRoutes(app) {
   /** Global leaderboard across all finished games. */
   app.get(
     '/api/group/leaderboard',
-    wrap(async (_req, res) => {
+    wrap(database, async (_req, res) => {
       const rows = await many(
         `with finished as (
            select p.user_id, p.name, p.room_id, p.score,
