@@ -3,6 +3,12 @@ export interface ParagraphAnchor {
   fraction: number;
 }
 
+export interface VisibleParagraphCell {
+  index: number;
+  top: number;
+  height: number;
+}
+
 export function clampRatio(value: number): number {
   return Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
 }
@@ -33,4 +39,26 @@ export function ratioForAnchor(
 /** Layout/programmatic events must not change the saved value during resume. */
 export function ratioAfterScroll(savedRatio: number | null, observedRatio: number): number {
   return clampRatio(savedRatio ?? observedRatio);
+}
+
+/** Find the actual visible row, even when virtualized frame positions are stale. */
+export function anchorForVisibleCells(
+  cells: VisibleParagraphCell[], viewportTop: number, viewportHeight: number,
+): ParagraphAnchor | null {
+  let first: VisibleParagraphCell | null = null;
+  for (const cell of cells) {
+    if (!Number.isInteger(cell.index) || cell.index < 0 || cell.height <= 0) continue;
+    if (cell.top + cell.height <= viewportTop || cell.top >= viewportTop + viewportHeight) continue;
+    if (first === null || cell.index < first.index) first = cell;
+  }
+  return first ? { index: first.index, fraction: clampRatio((viewportTop - first.top) / first.height) } : null;
+}
+
+/** A capped render window is temporary; only a mounted chapter end permits clamping. */
+export function isScrollTargetAligned(
+  desiredOffset: number, actualOffset: number, maximumOffset: number, chapterEndMounted: boolean,
+): boolean {
+  const reachableOffset = chapterEndMounted
+    ? Math.min(desiredOffset, Math.max(0, maximumOffset)) : desiredOffset;
+  return Math.abs(actualOffset - reachableOffset) <= 1;
 }

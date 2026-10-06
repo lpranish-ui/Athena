@@ -22,8 +22,10 @@ import {
     View,
 } from 'react-native';
 
+import { ListenBar } from '@/components/ListenBar';
 import { ReaderCell, ReaderCellLayoutContext } from '@/components/ReaderCell';
 import { ReaderParagraph } from '@/components/ReaderParagraph';
+import { WordLookupSheet } from '@/components/WordLookupSheet';
 import { LoadingView } from '@/components/ui';
 import { useReaderPosition } from '@/hooks/useReaderPosition';
 import {
@@ -40,7 +42,6 @@ import {
 import { api } from '@/lib/apiClient';
 import { exportNotesMarkdown } from '@/lib/exportNotes';
 import { HIGHLIGHT_COLOR_KEYS, HIGHLIGHT_DOTS, type HighlightColor } from '@/lib/highlight-colors';
-import { spacing } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -122,12 +123,16 @@ export default function ReaderScreen() {
   const [askError, setAskError] = useState<string | null>(null);
   const [noteColor, setNoteColor] = useState<HighlightColor>('gold');
   const [viewabilityConfig] = useState(() => READER_VIEWABILITY);
+  const [listenOpen, setListenOpen] = useState(false);
+  const [listenStart, setListenStart] = useState(0);
+  const [defineText, setDefineText] = useState<string | null>(null);
 
   const {
     scrollRef, pendingScrollRef, pendingParagraphRef, pendingParagraphChapterRef,
     paragraphCountRef, ratioRef, chapterIdRef, cancelSettle, cancelParagraphJump,
     flushProgress, tryJumpToParagraph, handleScroll, handleContentSize, handleLayout,
-    handleUserScroll, handleScrollToIndexFailed, handleCellLayout, handleViewableItemsChanged, resetMetrics,
+    handleUserScroll, handleCellLayout, handleViewableItemsChanged, resetMetrics,
+    firstVisibleRef,
   } = useReaderPosition(bookId);
   const pendingSearchRef = useRef<{ chapterId: string; needle: string } | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -445,6 +450,29 @@ export default function ReaderScreen() {
     jumpToChapter(targetIndex);
   };
 
+  // ── listen mode ───────────────────────────────────────────────────────────
+
+  const followListen = useCallback((paragraphIndex: number) => {
+    pendingParagraphRef.current = paragraphIndex;
+    pendingParagraphChapterRef.current = chapterIdRef.current;
+    pendingScrollRef.current = null;
+    tryJumpToParagraph();
+  }, [chapterIdRef, pendingParagraphChapterRef, pendingParagraphRef, pendingScrollRef, tryJumpToParagraph]);
+
+  const handleListenChapterEnd = () => {
+    if (index + 1 < chapters.length) {
+      jumpToChapter(index + 1);
+    } else {
+      setListenOpen(false);
+    }
+  };
+
+  const leaveReader = () => {
+    flushProgress();
+    if (router.canGoBack()) router.back();
+    else router.replace('/(tabs)/library');
+  };
+
   // ── rendering ─────────────────────────────────────────────────────────────
 
   if (loading) {
@@ -457,7 +485,7 @@ export default function ReaderScreen() {
         <Stack.Screen options={{ headerShown: false }} />
         <StatusBar style={settings.theme === 'dark' ? 'light' : 'dark'} />
         <View style={[styles.topBar, { backgroundColor: theme.chrome, borderColor: theme.border, paddingTop: insets.top + 8 }]}>
-          <Pressable style={styles.iconButton} onPress={() => router.back()}>
+          <Pressable style={styles.iconButton} onPress={leaveReader}>
             <Ionicons name="chevron-back" size={22} color={theme.text} />
           </Pressable>
           <Text style={[styles.topTitle, { color: theme.text }]} numberOfLines={1}>
@@ -486,7 +514,7 @@ export default function ReaderScreen() {
 
       {/* Top bar */}
       <View style={[styles.topBar, { backgroundColor: theme.chrome, borderColor: theme.border, paddingTop: insets.top + 8 }]}>
-        <Pressable style={styles.iconButton} onPress={() => router.back()}>
+        <Pressable style={styles.iconButton} onPress={leaveReader}>
           <Ionicons name="chevron-back" size={22} color={theme.text} />
         </Pressable>
         <Pressable style={styles.topCenter} onPress={() => setChaptersOpen(true)}>
@@ -507,6 +535,15 @@ export default function ReaderScreen() {
               <Text style={styles.notesBadgeText}>{notes.length > 99 ? '99+' : notes.length}</Text>
             </View>
           ) : null}
+        </Pressable>
+        <Pressable
+          style={styles.iconButton}
+          onPress={() => {
+            setListenStart(Math.max(0, firstVisibleRef.current));
+            setListenOpen(true);
+          }}
+        >
+          <Ionicons name="headset-outline" size={19} color={theme.text} />
         </Pressable>
         <Pressable style={styles.iconButton} onPress={() => setSettingsOpen(true)}>
           <Ionicons name="text" size={20} color={theme.text} />
@@ -548,7 +585,6 @@ export default function ReaderScreen() {
           scrollEventThrottle={64}
           onContentSizeChange={handleContentSize}
           onLayout={handleLayout}
-          onScrollToIndexFailed={handleScrollToIndexFailed}
           showsVerticalScrollIndicator={false}
           ListHeaderComponent={
             <Text style={[styles.chapterHeading, {
@@ -574,31 +610,23 @@ export default function ReaderScreen() {
               />
             );
           }}
-          ListFooterComponent={
-            <View style={[styles.chapterEnd, { borderColor: theme.border }]}>
-              <Text style={{ color: theme.muted, marginBottom: spacing.md }}>
-                {index + 1 < chapters.length
-                  ? `End of \u201c${chapter?.title ?? ''}\u201d`
-                  : 'You finished the last chapter \ud83c\udf89'}
-              </Text>
-              {index + 1 < chapters.length ? (
-                <Pressable
-                  style={[styles.nextChapterButton, { backgroundColor: theme.chrome, borderColor: theme.border }]}
-                  onPress={() => jumpToChapter(index + 1)}
-                >
-                  <Text style={{ color: theme.text, fontWeight: '700' }}>
-                    Next: {chapters[index + 1]?.title ?? 'Chapter'}
-                  </Text>
-                  <Ionicons name="arrow-forward" size={16} color={theme.text} />
-                </Pressable>
-              ) : null}
-            </View>
-          }
         />
         </ReaderCellLayoutContext.Provider>
       )}
 
-      {/* Bottom chapter bar */}
+      {/* Listen bar replaces the chapter nav while listening */}
+      {listenOpen ? (
+        <ListenBar
+          paragraphs={paragraphs}
+          startIndex={listenStart}
+          chapterKey={chapter?.id ?? 'none'}
+          title={chapter?.title ?? `Chapter ${index + 1}`}
+          palette={{ chrome: theme.chrome, text: theme.text, muted: theme.muted, border: theme.border }}
+          onActiveIndex={followListen}
+          onChapterEnd={handleListenChapterEnd}
+          onClose={() => setListenOpen(false)}
+        />
+      ) : (
       <View style={[styles.bottomBar, { backgroundColor: theme.chrome, borderColor: theme.border, paddingBottom: insets.bottom + 8 }]}>
         <Pressable
           style={[styles.navButton, index === 0 && styles.navDisabled]}
@@ -630,6 +658,7 @@ export default function ReaderScreen() {
           />
         </Pressable>
       </View>
+      )}
 
       {/* Settings sheet */}
       <Modal visible={settingsOpen} transparent animationType="slide" onRequestClose={() => setSettingsOpen(false)}>
@@ -783,6 +812,15 @@ export default function ReaderScreen() {
           >
             {actionTarget?.text.slice(0, 260) ?? ''}
           </Text>
+          <Pressable
+            style={[styles.choiceChip, { borderColor: theme.border, alignSelf: 'flex-start' }]}
+            onPress={() => {
+              setDefineText(actionTarget?.text ?? '');
+              setActionTarget(null);
+            }}
+          >
+            <Text style={{ color: theme.text, fontWeight: '600' }}>Define a word</Text>
+          </Pressable>
           <View style={styles.colorRow}>
             {HIGHLIGHT_COLOR_KEYS.map((key) => (
               <Pressable
@@ -852,6 +890,14 @@ export default function ReaderScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* Word lookup (from passage actions) */}
+      <WordLookupSheet
+        key={defineText ?? 'none'}
+        text={defineText}
+        palette={{ chrome: theme.chrome, text: theme.text, muted: theme.muted, border: theme.border }}
+        onClose={() => setDefineText(null)}
+      />
 
       {/* In-book search */}
       <Modal visible={searchOpen} transparent animationType="slide" onRequestClose={() => setSearchOpen(false)}>
@@ -1110,17 +1156,6 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
   },
   chapterHeading: { fontWeight: '800', marginBottom: 22 },
-  chapterEnd: { marginTop: 26, paddingTop: 20, borderTopWidth: StyleSheet.hairlineWidth, alignItems: 'center' },
-  nextChapterButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 12,
-    borderWidth: 1,
-    maxWidth: '100%',
-  },
   bottomBar: {
     flexDirection: 'row',
     alignItems: 'center',
