@@ -9,8 +9,8 @@ import { Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { Screen } from '@/components/Screen';
 import { Button, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
+import { getDeckCards, gradeCard, type DeckCard } from '@/lib/api';
 import { api } from '@/lib/apiClient';
-import { gradeCard, getDeckCards, type DeckCard } from '@/lib/api';
 import { gradePreview, isDue, scheduleCard, type FlashcardGrade } from '@/lib/review';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 

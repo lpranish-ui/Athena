@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { Platform } from 'react-native';
 import type {
   FlatList, LayoutChangeEvent, LayoutRectangle, NativeScrollEvent, NativeSyntheticEvent, ViewToken,
 } from 'react-native';
@@ -27,6 +28,27 @@ export function useReaderPosition(bookId: string) {
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finishTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const jumpAttemptsRef = useRef(0);
+  const debugCountRef = useRef(0);
+  const debugTargetRef = useRef<number | null>(null);
+  const debugOffsetRef = useRef<number | null>(null);
+
+  const debugPosition = useCallback((event: string, details: Record<string, unknown>) => {
+    if (debugCountRef.current >= 50) return;
+    debugCountRef.current += 1;
+    console.info('ATHENA_READER_DEBUG', JSON.stringify({
+      event,
+      count: paragraphCountRef.current,
+      viewportHeight: layoutHeightRef.current,
+      averageHeight: averageHeightRef.current,
+      validMeasurements: cellsRef.current.size,
+      measuredHeight: measuredHeightRef.current,
+      firstVisible: firstVisibleRef.current,
+      scrollOffset: offsetRef.current,
+      pendingRatio: pendingScrollRef.current,
+      sampleHeights: [...cellsRef.current.entries()].slice(0, 6).map(([index, cell]) => [index, cell.height]),
+      ...details,
+    }));
+  }, []);
 
   const clearRetry = useCallback(() => {
     if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
@@ -68,15 +90,56 @@ export function useReaderPosition(bookId: string) {
     }
   }, [bookId]);
 
+  const webScroller = useCallback((): HTMLElement | null => {
+    if (Platform.OS !== 'web') return null;
+    const node = scrollRef.current?.getScrollableNode() as HTMLElement | undefined;
+    return node && typeof node.querySelector === 'function' ? node : null;
+  }, []);
+
+  const currentCellLayout = useCallback((index: number): LayoutRectangle | undefined => {
+    const scroller = webScroller();
+    if (!scroller) return cellsRef.current.get(index);
+    // ResizeObserver does not report a cell moving when a virtual spacer
+    // changes. Read its current position rather than the old onLayout y.
+    const element = scroller.querySelector<HTMLElement>(`[data-reader-index="${index}"]`);
+    if (!element) return undefined;
+    const rect = element.getBoundingClientRect();
+    const viewport = scroller.getBoundingClientRect();
+    if (rect.height <= 0) return undefined;
+    return {
+      x: rect.left - viewport.left + scroller.scrollLeft,
+      y: rect.top - viewport.top + scroller.scrollTop,
+      width: rect.width,
+      height: rect.height,
+    };
+  }, [webScroller]);
+
   const updateObservedRatio = useCallback(() => {
-    const index = firstVisibleRef.current;
-    const cell = cellsRef.current.get(index);
+    let index = firstVisibleRef.current;
+    const scroller = webScroller();
+    if (scroller) {
+      const viewport = scroller.getBoundingClientRect();
+      let firstVisible: number | null = null;
+      for (const element of scroller.querySelectorAll<HTMLElement>('[data-reader-index]')) {
+        const rect = element.getBoundingClientRect();
+        if (rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom) {
+          const candidate = Number(element.dataset.readerIndex);
+          if (Number.isInteger(candidate) && (firstVisible === null || candidate < firstVisible)) {
+            firstVisible = candidate;
+          }
+        }
+      }
+      if (firstVisible !== null) index = firstVisible;
+      firstVisibleRef.current = index;
+      offsetRef.current = scroller.scrollTop;
+    }
+    const cell = currentCellLayout(index);
     const fraction = cell && cell.height > 0
       ? Math.min(1, Math.max(0, (offsetRef.current - cell.y) / cell.height)) : 0;
     const observed = ratioForAnchor({ index, fraction }, paragraphCountRef.current,
       layoutHeightRef.current, averageHeightRef.current);
     ratioRef.current = ratioAfterScroll(pendingScrollRef.current, observed);
-  }, []);
+  }, [currentCellLayout, webScroller]);
 
   const tryPosition = useCallback(function position() {
     if (!scrollRef.current || !paragraphCountRef.current || layoutHeightRef.current <= 0) return;
@@ -92,7 +155,9 @@ export function useReaderPosition(bookId: string) {
       // Wait for initial row heights instead of treating the initial native
       // contentSize (often just 30-45 paragraphs) as the whole chapter.
       if (averageHeightRef.current <= 0 || cellsRef.current.size < Math.min(6, paragraphCountRef.current)) return;
-      anchor = resumeAnchorRef.current ?? anchorForRatio(saved, paragraphCountRef.current,
+      // Text wrapping and the viewport can settle after the first layout. Keep
+      // the saved ratio fixed, but recalculate its anchor from current metrics.
+      anchor = anchorForRatio(saved, paragraphCountRef.current,
         layoutHeightRef.current, averageHeightRef.current);
       resumeAnchorRef.current = anchor;
     }
@@ -100,7 +165,13 @@ export function useReaderPosition(bookId: string) {
       if (isPassage) cancelParagraphJump();
       return;
     }
-    const cell = cellsRef.current.get(anchor.index);
+    const cell = currentCellLayout(anchor.index);
+    if (debugTargetRef.current !== anchor.index ||
+      (cell && debugOffsetRef.current !== cell.y)) {
+      debugTargetRef.current = anchor.index;
+      debugOffsetRef.current = cell?.y ?? null;
+      debugPosition('target', { anchor, cell, attempts: jumpAttemptsRef.current });
+    }
     if (cell) {
       const offset = Math.max(0, cell.y + anchor.fraction * cell.height - (isPassage ? 16 : 0));
       if (lastAppliedOffsetRef.current === null || Math.abs(lastAppliedOffsetRef.current - offset) > 1) {
@@ -121,13 +192,18 @@ export function useReaderPosition(bookId: string) {
     // batch instead of consuming the retry limit for every individual row.
     if (retryTimerRef.current !== null || jumpAttemptsRef.current >= 60) return;
     jumpAttemptsRef.current += 1;
-    scrollRef.current.scrollToIndex({ index: anchor.index, animated: false, viewOffset: 16 });
+    // The list's cached frame estimates can themselves be stale after text
+    // wraps. Our measured average drives the next render window forward.
+    scrollRef.current.scrollToOffset({
+      offset: Math.max(0, averageHeightRef.current * (anchor.index + anchor.fraction) - (isPassage ? 16 : 0)),
+      animated: false,
+    });
     clearRetry();
     retryTimerRef.current = setTimeout(() => {
       retryTimerRef.current = null;
       position();
     }, 120);
-  }, [cancelParagraphJump, clearRetry]);
+  }, [cancelParagraphJump, clearRetry, currentCellLayout, debugPosition]);
 
   const tryJumpToParagraph = useCallback(() => {
     if (pendingParagraphRef.current !== null &&
@@ -163,13 +239,28 @@ export function useReaderPosition(bookId: string) {
     updateObservedRatio();
   }, [updateObservedRatio]);
 
+  // Fast Refresh can invalidate useCallback caches. FlatList requires this
+  // particular prop to retain its identity for the entire mounted list.
+  const latestViewabilityCallbackRef = useRef(handleViewableItemsChanged);
+  useEffect(() => {
+    latestViewabilityCallbackRef.current = handleViewableItemsChanged;
+  }, [handleViewableItemsChanged]);
+  const stableViewabilityCallbackRef = useRef((info: { viewableItems: ViewToken<string>[] }) => {
+    latestViewabilityCallbackRef.current(info);
+  });
+
   const handleCellLayout = useCallback((index: number, layout: LayoutRectangle) => {
+    if (!Number.isFinite(layout.height) || layout.height <= 0) {
+      debugPosition('skip-cell', { index, layout });
+      return;
+    }
     const prior = cellsRef.current.get(index);
     cellsRef.current.set(index, layout);
     measuredHeightRef.current += layout.height - (prior?.height ?? 0);
     averageHeightRef.current = measuredHeightRef.current / Math.max(1, cellsRef.current.size);
+    if (cellsRef.current.size <= 6) debugPosition('cell', { index, layout });
     tryPosition();
-  }, [tryPosition]);
+  }, [debugPosition, tryPosition]);
 
   const handleContentSize = useCallback(() => tryPosition(), [tryPosition]);
   const handleLayout = useCallback((event: LayoutChangeEvent) => {
@@ -200,6 +291,6 @@ export function useReaderPosition(bookId: string) {
     paragraphCountRef, ratioRef, chapterIdRef, cancelSettle, cancelParagraphJump,
     resetMetrics, flushProgress, tryJumpToParagraph, handleScroll, handleContentSize,
     handleLayout, handleUserScroll, handleScrollToIndexFailed, handleCellLayout,
-    handleViewableItemsChanged,
+    handleViewableItemsChanged: stableViewabilityCallbackRef.current,
   };
 }

@@ -7,7 +7,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-import { api, apiRequest, ApiError } from './apiClient';
+import { api, ApiError, apiRequest } from './apiClient';
 
 export type FileKind = 'pdf' | 'epub' | 'txt';
 

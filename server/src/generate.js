@@ -14,10 +14,10 @@
 // ============================================================================
 
 import { chatJson, getVerifyModel, MissingKeyError } from './ai.js';
-import { one, query, withTransaction } from './db.js';
-import { HttpError } from './http.js';
 import { contextWithPageMarkers, sampleChapterContext } from './context.js';
+import { one, query, withTransaction } from './db.js';
 import { verifiedQuestionChoices } from './grounding.js';
+import { HttpError } from './http.js';
 import {
     fixedChaptersSection,
     normalizeForMatch,
@@ -90,8 +90,19 @@ async function getTargetExam(userId) {
  * an unverified question to be saved.
  */
 async function verifyAnswers(questions, contexts, userId) {
+  // Cloze questions have a single option — a blind "choose the best option"
+  // check would trivially agree with the key, so they skip it. Their grounding
+  // comes from validateQuestion (blank + term inside the located quote).
+  const checkable = [];
+  const autoVerified = [];
+  questions.forEach((question) => {
+    if (question.type === 'cloze') autoVerified.push(question);
+    else checkable.push(question);
+  });
+  if (checkable.length === 0) return autoVerified;
+
   try {
-    const payload = questions.map((question, index) => ({
+    const payload = checkable.map((question, index) => ({
       question_index: index + 1,
       question: question.question,
       options: question.options.map((option, optionIndex) => `(${optionIndex}) ${option}`),
@@ -132,7 +143,7 @@ async function verifyAnswers(questions, contexts, userId) {
     });
 
     const parsed = JSON.parse(raw.replace(/```(?:json)?/g, '').trim());
-    return verifiedQuestionChoices(questions, parsed.answers);
+    return [...verifiedQuestionChoices(checkable, parsed.answers), ...autoVerified];
   } catch {
     return [];
   }

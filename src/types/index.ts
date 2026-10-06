@@ -3,7 +3,7 @@
 export type Difficulty = 'easy' | 'medium' | 'hard';
 export type BookStatus = 'processing' | 'queued' | 'ready' | 'error';
 export type SetStatus = 'generating' | 'ready' | 'error';
-export type QuestionType = 'single_best_answer' | 'vignette' | 'true_false';
+export type QuestionType = 'single_best_answer' | 'vignette' | 'true_false' | 'cloze';
 export type QuizMode = 'tutor' | 'exam';
 export type FlagReason = 'incorrect' | 'unclear' | 'duplicate' | 'other';
 

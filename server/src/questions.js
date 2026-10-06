@@ -9,13 +9,14 @@
 //
 // Node port of supabase/functions/_shared/questions.ts.
 
-export const QUESTION_TYPES = ['single_best_answer', 'vignette', 'true_false'];
+export const QUESTION_TYPES = ['single_best_answer', 'vignette', 'true_false', 'cloze'];
 
 export const TYPE_LABEL = {
   single_best_answer: 'single best answer multiple-choice (exactly 4 options)',
   vignette:
     'clinical vignette multiple-choice (a short patient scenario as the stem, exactly 4 options)',
   true_false: 'true / false (options are exactly ["True", "False"])',
+  cloze: 'cloze / fill-in-the-blank (one sentence with one key term replaced by "______")',
 };
 
 export const SYSTEM_PROMPT = [
@@ -172,7 +173,9 @@ export function requestSection(args) {
     '- Exactly one option is correct; never use "all of the above" or "none of the above".',
     args.type === 'true_false'
       ? '- The options must be exactly ["True", "False"] and correct_index is 0 or 1.'
-      : '- Each question has exactly 4 options.',
+      : args.type === 'cloze'
+        ? '- The "question" is ONE sentence copied EXACTLY from the chapter text with ONE key term replaced by six underscores ("______"; keep the rest of the sentence word-for-word). options must be exactly ["<the missing term>"] and correct_index is 0.'
+        : '- Each question has exactly 4 options.',
     '- "explanation": 1–3 sentences on why the correct answer is right.',
     '- "option_explanations": one short sentence for EVERY option (why it is right or wrong), in the same order as the options.',
     '- "supporting_quote": copy 10–25 consecutive words EXACTLY (word for word) from the chapter text above that prove the answer. Never paraphrase, shorten words, or fix spelling.',
@@ -246,6 +249,10 @@ export function validateQuestion(raw, chapters, type) {
 
   if (type === 'true_false') {
     if (options.length !== 2 || options[0] !== 'True' || options[1] !== 'False') return null;
+  } else if (type === 'cloze') {
+    if (options.length !== 1) return null;
+    if (!/_{3,}/.test(question)) return null;
+    if (correctIndex !== 0) return null;
   } else if (options.length !== 4) {
     return null;
   }
@@ -272,6 +279,11 @@ export function validateQuestion(raw, chapters, type) {
     (hint >= 0 ? matches.find((match) => match.index === hint) : undefined) ??
     (matches.length === 1 ? matches[0] : null);
   if (!chosen) return null;
+
+  // Cloze: the missing term must appear verbatim in the located quote.
+  if (type === 'cloze' && !normalizeForMatch(quote).includes(normalizeForMatch(options[0]))) {
+    return null;
+  }
 
   const padded = [...optionExplanations];
   while (padded.length < options.length) padded.push('');

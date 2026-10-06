@@ -22,6 +22,16 @@ test('resume and no-scroll exit preserve the saved ratio through late layout scr
   assert.equal(ratioAfterScroll(null, 0.45), 0.45);
 });
 
+test('resume corrects early compact row estimates after mobile text wraps', () => {
+  const saved = 0.73449296;
+  const early = anchorForRatio(saved, 180, 738, 26);
+  const wrapped = anchorForRatio(saved, 180, 738, 197);
+  assert.equal(early.index, 111);
+  assert.equal(wrapped.index, 129);
+  assert.ok(Math.abs(ratioForAnchor(wrapped, 180, 738, 197) - saved) < 0.000001);
+  assert.equal(ratioAfterScroll(saved, ratioForAnchor(early, 180, 738, 197)), saved);
+});
+
 test('chapter endpoints and empty/invalid input are bounded', () => {
   assert.deepEqual(anchorForRatio(0, 180, 600, 200), { index: 0, fraction: 0 });
   assert.equal(ratioForAnchor({ index: 177, fraction: 0 }, 180, 600, 200), 1);

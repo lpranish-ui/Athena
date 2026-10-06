@@ -5,8 +5,8 @@ import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-rou
 import { useCallback, useState } from 'react';
 import { Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 
-import { Screen } from '@/components/Screen';
 import { LoadError } from '@/components/LoadError';
+import { Screen } from '@/components/Screen';
 import { Button, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { saveFlashcards } from '@/lib/api';
 import { api } from '@/lib/apiClient';

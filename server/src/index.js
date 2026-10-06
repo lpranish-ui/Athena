@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises';
-import { query, pool } from './db.js';
 import { createApp } from './app.js';
 import { assertAuthConfigured } from './auth.js';
+import { pool, query } from './db.js';
 import { createUploadWorker } from './uploads.js';
 
 assertAuthConfigured();

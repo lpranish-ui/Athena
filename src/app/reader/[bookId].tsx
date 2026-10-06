@@ -10,39 +10,39 @@ import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Modal,
-  FlatList,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
+    ActivityIndicator,
+    FlatList,
+    Modal,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View,
 } from 'react-native';
 
-import { LoadingView } from '@/components/ui';
-import { ReaderParagraph } from '@/components/ReaderParagraph';
 import { ReaderCell, ReaderCellLayoutContext } from '@/components/ReaderCell';
+import { ReaderParagraph } from '@/components/ReaderParagraph';
+import { LoadingView } from '@/components/ui';
 import { useReaderPosition } from '@/hooks/useReaderPosition';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  addReaderNote,
-  askBook,
-  deleteReaderNote,
-  getReaderNotes,
-  getReadingProgress,
-  searchBook,
-  type BookAnswer,
-  type BookSearchHit,
-  type ReaderNote,
+    addReaderNote,
+    askBook,
+    deleteReaderNote,
+    getReaderNotes,
+    getReadingProgress,
+    searchBook,
+    type BookAnswer,
+    type BookSearchHit,
+    type ReaderNote,
 } from '@/lib/api';
+import { api } from '@/lib/apiClient';
 import { exportNotesMarkdown } from '@/lib/exportNotes';
 import { HIGHLIGHT_COLOR_KEYS, HIGHLIGHT_DOTS, type HighlightColor } from '@/lib/highlight-colors';
-import { api } from '@/lib/apiClient';
 import { spacing } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 // ── reader themes ────────────────────────────────────────────────────────────
 
@@ -121,6 +121,7 @@ export default function ReaderScreen() {
   const [asking, setAsking] = useState(false);
   const [askError, setAskError] = useState<string | null>(null);
   const [noteColor, setNoteColor] = useState<HighlightColor>('gold');
+  const [viewabilityConfig] = useState(() => READER_VIEWABILITY);
 
   const {
     scrollRef, pendingScrollRef, pendingParagraphRef, pendingParagraphChapterRef,
@@ -543,7 +544,7 @@ export default function ReaderScreen() {
             },
           } : {})}
           onViewableItemsChanged={handleViewableItemsChanged}
-          viewabilityConfig={READER_VIEWABILITY}
+          viewabilityConfig={viewabilityConfig}
           scrollEventThrottle={64}
           onContentSizeChange={handleContentSize}
           onLayout={handleLayout}

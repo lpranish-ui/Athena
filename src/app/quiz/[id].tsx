@@ -6,14 +6,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 
-import { Screen } from '@/components/Screen';
 import { LoadError } from '@/components/LoadError';
-import { useQuizClock } from '@/hooks/useQuizClock';
+import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
+import { useQuizClock } from '@/hooks/useQuizClock';
 import { flagQuestion, replaceQuestion } from '@/lib/api';
 import { api } from '@/lib/apiClient';
+import { isClozeCorrect } from '@/lib/cloze';
 import { percentage } from '@/lib/format';
 import { scheduleReview } from '@/lib/review';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
@@ -32,6 +33,7 @@ const TYPE_LABELS: Record<string, string> = {
   single_best_answer: 'Standard MCQs',
   vignette: 'Clinical vignettes',
   true_false: 'True / False',
+  cloze: 'Cloze (fill-in-the-blank)',
 };
 
 function formatClock(totalSeconds: number): string {
@@ -176,6 +178,7 @@ export default function QuizScreen() {
   const [index, setIndex] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
   const [answers, setAnswers] = useState<number[]>([]);
+  const [clozeDrafts, setClozeDrafts] = useState<Record<number, string>>({});
   const { elapsed, getElapsed, resetElapsed } = useQuizClock(phase === 'running');
   const [saving, setSaving] = useState(false);
 
@@ -238,16 +241,43 @@ export default function QuizScreen() {
     });
   };
 
+  const submitCloze = () => {
+    if (!current || selected !== null) return;
+    const draft = (clozeDrafts[index] ?? '').trim();
+    if (!draft) return;
+    const ok = isClozeCorrect(draft, current.options[0] ?? '');
+    setSelected(ok ? 0 : -1);
+    setAnswers((previous) => {
+      const next = [...previous];
+      next[index] = ok ? 0 : -1;
+      return next;
+    });
+  };
+
   const finish = async () => {
     setPhase('done');
     if (mcqs.length === 0) return;
     setSaving(true);
 
+    // Cloze answers typed in exam mode were never checked — grade them now.
+    const final = [...answers];
+    mcqs.forEach((mcq, mcqIndex) => {
+      if (mcq.question_type === 'cloze' && final[mcqIndex] === undefined) {
+        const draft = clozeDrafts[mcqIndex] ?? '';
+        final[mcqIndex] = isClozeCorrect(draft, mcq.options[0] ?? '') ? 0 : -1;
+      }
+    });
+    const finalScore = mcqs.reduce(
+      (sum, mcq, mcqIndex) => sum + (final[mcqIndex] === mcq.correct_index ? 1 : 0),
+      0,
+    );
+    setAnswers(final);
+
     try {
       await api.post(`/api/sets/${id}/attempts`, {
-        score,
+        score: finalScore,
         total: mcqs.length,
-        answers,
+        answers: final,
         mode,
         duration_seconds: getElapsed(),
       });
@@ -273,7 +303,7 @@ export default function QuizScreen() {
       const byQuestion = new Map(existing.map((row) => [row.question_id, row]));
 
       const rows = mcqs.flatMap((mcq, mcqIndex) => {
-        const correct = answers[mcqIndex] === mcq.correct_index;
+        const correct = final[mcqIndex] === mcq.correct_index;
         const prior = byQuestion.get(mcq.id);
         if (!prior && correct) return []; // only track missed questions first
         const schedule = scheduleReview(prior ?? null, correct);
@@ -453,20 +483,40 @@ export default function QuizScreen() {
                 </View>
                 <Text style={styles.questionText}>{mcq.question}</Text>
 
-                <Text
-                  style={[
-                    styles.reviewAnswer,
-                    { color: correct ? colors.success : colors.danger },
-                  ]}
-                >
-                  Your answer: {answered !== undefined ? LETTERS[answered] : '—'}.{' '}
-                  {answered !== undefined ? mcq.options[answered] : 'Not answered'}
-                </Text>
-                {!correct ? (
-                  <Text style={[styles.reviewAnswer, { color: colors.success }]}>
-                    Correct: {LETTERS[mcq.correct_index]}. {mcq.options[mcq.correct_index]}
-                  </Text>
-                ) : null}
+                {mcq.question_type === 'cloze' ? (
+                  <>
+                    <Text
+                      style={[
+                        styles.reviewAnswer,
+                        { color: correct ? colors.success : colors.danger },
+                      ]}
+                    >
+                      Your answer: {(clozeDrafts[mcqIndex] ?? '').trim() || '—'}
+                    </Text>
+                    {!correct ? (
+                      <Text style={[styles.reviewAnswer, { color: colors.success }]}>
+                        Answer: {mcq.options[0]}
+                      </Text>
+                    ) : null}
+                  </>
+                ) : (
+                  <>
+                    <Text
+                      style={[
+                        styles.reviewAnswer,
+                        { color: correct ? colors.success : colors.danger },
+                      ]}
+                    >
+                      Your answer: {answered !== undefined ? LETTERS[answered] : '—'}.{' '}
+                      {answered !== undefined ? mcq.options[answered] : 'Not answered'}
+                    </Text>
+                    {!correct ? (
+                      <Text style={[styles.reviewAnswer, { color: colors.success }]}>
+                        Correct: {LETTERS[mcq.correct_index]}. {mcq.options[mcq.correct_index]}
+                      </Text>
+                    ) : null}
+                  </>
+                )}
 
                 {mcq.explanation ? (
                   <Text style={styles.explanation}>{mcq.explanation}</Text>
@@ -514,6 +564,44 @@ export default function QuizScreen() {
 
         <Text style={styles.questionText}>{current.question}</Text>
 
+        {current.question_type === 'cloze' ? (
+          <View style={styles.clozeWrap}>
+            <TextInput
+              value={clozeDrafts[index] ?? ''}
+              onChangeText={(text) =>
+                setClozeDrafts((previous) => ({ ...previous, [index]: text }))
+              }
+              placeholder="Type the missing term..."
+              placeholderTextColor={colors.textMuted}
+              editable={!revealed}
+              autoCorrect={false}
+              autoCapitalize="none"
+              style={[
+                styles.clozeInput,
+                revealed && selected === 0 && styles.clozeInputCorrect,
+                revealed && selected !== 0 && styles.clozeInputWrong,
+              ]}
+            />
+            {mode === 'tutor' && selected === null ? (
+              <Button
+                label="Check answer"
+                icon="checkmark-outline"
+                disabled={!(clozeDrafts[index] ?? '').trim()}
+                onPress={submitCloze}
+              />
+            ) : null}
+            {revealed ? (
+              <Text
+                style={[
+                  styles.reviewAnswer,
+                  { color: selected === 0 ? colors.success : colors.danger },
+                ]}
+              >
+                {selected === 0 ? 'Correct!' : `Answer: ${current.options[0]}`}
+              </Text>
+            ) : null}
+          </View>
+        ) : (
         <View style={styles.options}>
           {current.options.map((option, optionIndex) => {
             const isCorrect = optionIndex === current.correct_index;
@@ -568,6 +656,7 @@ export default function QuizScreen() {
             );
           })}
         </View>
+        )}
 
         {mode === 'tutor' && revealed ? (
           <Card style={styles.explanationCard}>
@@ -586,7 +675,11 @@ export default function QuizScreen() {
               <Text style={styles.explanation}>{current.explanation}</Text>
             ) : null}
 
-            {current.option_explanations && current.option_explanations.some(Boolean) ? (
+            {current.question_type === 'cloze' && current.option_explanations?.[0] ? (
+              <Text style={styles.explanation}>Why: {current.option_explanations[0]}</Text>
+            ) : null}
+
+            {current.question_type !== 'cloze' && current.option_explanations && current.option_explanations.some(Boolean) ? (
               <View style={styles.optionExplanations}>
                 <Text style={styles.optionExplanationsTitle}>Why each option:</Text>
                 {current.options.map((option, optionIndex) => {
@@ -748,6 +841,19 @@ const styles = StyleSheet.create({
   letterTextExamChosen: {
     color: colors.primary,
   },
+  clozeWrap: { gap: 10 },
+  clozeInput: {
+    borderWidth: 1.5,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    color: colors.text,
+    fontSize: fontSize.md,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  clozeInputCorrect: { borderColor: colors.success },
+  clozeInputWrong: { borderColor: colors.danger },
   optionText: {
     flex: 1,
     color: colors.text,

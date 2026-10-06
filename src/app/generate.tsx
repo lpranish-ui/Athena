@@ -30,6 +30,7 @@ const QUESTION_TYPE_OPTIONS: { label: string; value: QuestionType }[] = [
   { label: 'Standard', value: 'single_best_answer' },
   { label: 'Vignette', value: 'vignette' },
   { label: 'True / False', value: 'true_false' },
+  { label: 'Cloze', value: 'cloze' },
 ];
 
 function Segmented<T extends string | number>({

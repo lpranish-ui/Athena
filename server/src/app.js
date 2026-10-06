@@ -1,16 +1,16 @@
 import cors from 'cors';
 import express from 'express';
-import { registerAuthRoutes, requireAuth } from './auth.js';
+import { createAiLimiter } from './ai-limit.js';
 import { answerQuestion as defaultAnswerQuestion } from './ask.js';
+import { registerAuthRoutes, requireAuth } from './auth.js';
+import { createChapterService } from './chapters.js';
 import * as defaultDatabase from './db.js';
 import { generateMcqs as defaultGenerateMcqs, replaceQuestion as defaultReplaceQuestion } from './generate.js';
 import { registerGroupRoutes } from './group.js';
 import { HttpError } from './http.js';
 import { IngestError, ingestFile as defaultIngestFile, ingestText as defaultIngestText } from './ingest.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
-import { createChapterService } from './chapters.js';
 import { registerUploadRoutes } from './uploads.js';
-import { createAiLimiter } from './ai-limit.js';
 
 /** Construct routes without connecting to a database or opening a listening socket. */
 export function createApp({ database = defaultDatabase, authenticate = requireAuth,

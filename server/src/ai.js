@@ -135,6 +135,18 @@ export async function chatJson({
   const key = process.env.DEEPSEEK_API_KEY;
   if (!key) throw new MissingKeyError();
 
+  // DeepSeek JSON mode requires an explicit JSON instruction, even when the
+  // caller already supplied a JSON-shaped schema. Work on fresh objects so
+  // retries and other calls cannot mutate the caller's cached prompt.
+  const requestMessages = messages.map((message) => ({ ...message }));
+  const instruction = 'Return one valid JSON object only. Do not include markdown fences or commentary.';
+  const systemIndex = requestMessages.findIndex((message) => message.role === 'system' && typeof message.content === 'string');
+  if (systemIndex >= 0) {
+    requestMessages[systemIndex].content += `\n${instruction}`;
+  } else {
+    requestMessages.unshift({ role: 'system', content: instruction });
+  }
+
   const model = modelOverride?.trim() || getModel();
   let lastError = 'The AI returned an empty response.';
 
@@ -154,7 +166,7 @@ export async function chatJson({
         },
         body: JSON.stringify({
           model,
-          messages,
+          messages: requestMessages,
           // Thinking ON (default) makes the model copy chapter text verbatim
           // in its supporting quotes. It costs 20-40s on chapter-sized
           // prompts, so the reasoning must have headroom below max_tokens —

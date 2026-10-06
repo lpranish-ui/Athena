@@ -12,7 +12,7 @@ export function ReaderCell({ index, style, onLayout, onFocusCapture, children }:
   return (
     <View
       style={style}
-      {...{ onFocusCapture }}
+      {...{ onFocusCapture, dataSet: { readerIndex: String(index) } }}
       onLayout={(event) => {
         onLayout?.(event);
         recordLayout(index, event.nativeEvent.layout);
