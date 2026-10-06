@@ -42,6 +42,7 @@ import {
 import { api } from '@/lib/apiClient';
 import { exportNotesMarkdown } from '@/lib/exportNotes';
 import { HIGHLIGHT_COLOR_KEYS, HIGHLIGHT_DOTS, type HighlightColor } from '@/lib/highlight-colors';
+import { getOfflineMeta, readOfflineChapter } from '@/lib/offline';
 import type { Book, ChapterSummary } from '@/types';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -150,12 +151,24 @@ export default function ReaderScreen() {
     if (!bookId) return;
     void (async () => {
       try {
-        const [bookData, chaptersData, progress, settingsRaw, notesData] = await Promise.all([
-          api.get<Book>(`/api/books/${bookId}`),
-          api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`),
-          getReadingProgress(bookId),
+        // Network first; fall back to the downloaded copy when unreachable.
+        let bookData: Book;
+        let chaptersData: ChapterSummary[];
+        try {
+          [bookData, chaptersData] = await Promise.all([
+            api.get<Book>(`/api/books/${bookId}`),
+            api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`),
+          ]);
+        } catch (networkError) {
+          const meta = await getOfflineMeta(bookId);
+          if (!meta) throw networkError;
+          bookData = meta.book;
+          chaptersData = meta.chapters;
+        }
+        const [progress, settingsRaw, notesData] = await Promise.all([
+          getReadingProgress(bookId).catch(() => null),
           AsyncStorage.getItem(SETTINGS_KEY),
-          getReaderNotes(bookId),
+          getReaderNotes(bookId).catch(() => [] as ReaderNote[]),
         ]);
 
         setNotes(notesData);
@@ -223,9 +236,14 @@ export default function ReaderScreen() {
       if (cancelled) return;
       setLoadingChapter(true);
       try {
-        const data = await api.get<ChapterContent & { content: string }>(
-          `/api/chapters/${summary.id}`,
-        );
+        let data: ChapterContent;
+        try {
+          data = await api.get<ChapterContent>(`/api/chapters/${summary.id}`);
+        } catch (networkError) {
+          const cached = await readOfflineChapter(bookId, summary.id);
+          if (!cached) throw networkError;
+          data = { id: cached.id, title: cached.title, content: cached.content, number: cached.number ?? 0 };
+        }
         if (cancelled) return;
         // A search result waiting for this chapter: land on its paragraph.
         const pendingSearch = pendingSearchRef.current;
@@ -265,7 +283,7 @@ export default function ReaderScreen() {
     return () => {
       cancelled = true;
     };
-  }, [chapters, index, chapter?.id, tryJumpToParagraph, chapterIdRef, paragraphCountRef, pendingParagraphChapterRef, pendingParagraphRef, resetMetrics]);
+  }, [bookId, chapters, index, chapter?.id, tryJumpToParagraph, chapterIdRef, paragraphCountRef, pendingParagraphChapterRef, pendingParagraphRef, resetMetrics]);
 
   // ── persist settings ──────────────────────────────────────────────────────
 

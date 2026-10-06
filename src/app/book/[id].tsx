@@ -14,6 +14,13 @@ import {
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
 import { api } from '@/lib/apiClient';
+import {
+  deleteOfflineBook,
+  downloadBook,
+  formatBytes,
+  getOfflineMeta,
+  type OfflineBookMeta,
+} from '@/lib/offline';
 import { colors, fontSize, getSubjectColor, radius, spacing, withAlpha } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';
 
@@ -26,9 +33,13 @@ export default function BookScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [offlineMeta, setOfflineMeta] = useState<OfflineBookMeta | null>(null);
+  const [downloading, setDownloading] = useState<{ done: number; total: number } | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
+
+    setOfflineMeta(await getOfflineMeta(id));
 
     try {
       const bookData = await api.get<Book>(`/api/books/${id}`);
@@ -53,6 +64,7 @@ export default function BookScreen() {
     setBusy(true);
     try {
       await api.del(`/api/books/${book.id}`);
+      await deleteOfflineBook(book.id).catch(() => {});
       router.back();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not delete this book.');
@@ -73,6 +85,25 @@ export default function BookScreen() {
       { text: 'Cancel', style: 'cancel' },
       { text: 'Delete', style: 'destructive', onPress: () => void doDelete() },
     ]);
+  };
+
+  const startDownload = async () => {
+    if (!book) return;
+    setDownloading({ done: 0, total: chapters.length });
+    try {
+      const meta = await downloadBook(book.id, (done, total) => setDownloading({ done, total }));
+      setOfflineMeta(meta);
+      setDownloading(null);
+    } catch (err) {
+      setDownloading(null);
+      setError(err instanceof Error ? err.message : 'Could not download this book.');
+    }
+  };
+
+  const removeDownload = async () => {
+    if (!book) return;
+    setOfflineMeta(null);
+    await deleteOfflineBook(book.id).catch(() => {});
   };
 
   if (loading) {
@@ -133,6 +164,46 @@ export default function BookScreen() {
               onPress={() => router.push({ pathname: '/generate', params: { bookId: book.id } })}
             />
           </View>
+        ) : null}
+
+        {chapters.length > 0 ? (
+          offlineMeta ? (
+            <Card style={styles.notice}>
+              <Text style={styles.noticeTitle}>Available offline</Text>
+              <Text style={styles.noticeText}>
+                {offlineMeta.chapters.length}{' '}
+                {offlineMeta.chapters.length === 1 ? 'chapter' : 'chapters'} saved on this device (
+                {formatBytes(offlineMeta.bytes)}). The reader works without a connection.
+              </Text>
+              <Button
+                label="Remove download"
+                icon="cloud-offline-outline"
+                variant="secondary"
+                small
+                onPress={() => void removeDownload()}
+              />
+            </Card>
+          ) : (
+            <Card style={styles.notice}>
+              <Text style={styles.noticeTitle}>Read offline</Text>
+              <Text style={styles.noticeText}>
+                Save every chapter to this device so this book opens without a connection.
+              </Text>
+              <Button
+                label={
+                  downloading
+                    ? `Downloading ${downloading.done}/${downloading.total}...`
+                    : 'Download for offline'
+                }
+                icon="download-outline"
+                variant="secondary"
+                small
+                loading={downloading !== null}
+                disabled={downloading !== null}
+                onPress={() => void startDownload()}
+              />
+            </Card>
+          )
         ) : null}
 
         {error ? <ErrorBanner message={error} /> : null}
