@@ -18,6 +18,7 @@ import { isClozeCorrect } from '@/lib/cloze';
 import { percentage } from '@/lib/format';
 import { scheduleReview } from '@/lib/review';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
+import { shareContent } from '@/lib/share';
 import type { FlagReason, Mcq, McqSetWithContext, QuizMode } from '@/types';
 
 const LETTERS = 'ABCDEFGH';
@@ -181,6 +182,8 @@ export default function QuizScreen() {
   const [clozeDrafts, setClozeDrafts] = useState<Record<number, string>>({});
   const { elapsed, getElapsed, resetElapsed } = useQuizClock(phase === 'running');
   const [saving, setSaving] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const [shareNote, setShareNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) {
@@ -538,6 +541,20 @@ export default function QuizScreen() {
     );
   }
 
+  // ── Share ──────────────────────────────────────────────────────────────────
+  const shareQuiz = async () => {
+    if (!id) return;
+    try {
+      setSharing(true);
+      const { method } = await shareContent('set', id, 'Shared quiz');
+      setShareNote(method === 'copied' ? 'Link copied to the clipboard.' : null);
+    } catch (err) {
+      setShareNote(err instanceof Error ? err.message : 'Could not create the link.');
+    } finally {
+      setSharing(false);
+    }
+  };
+
   // ── Question view (running) ────────────────────────────────────────────────
   const progress = ((index + 1) / mcqs.length) * 100;
 
@@ -553,11 +570,22 @@ export default function QuizScreen() {
             <Ionicons name="time-outline" size={14} color={colors.textMuted} />
             <Text style={styles.progressScore}>{formatClock(elapsed)}</Text>
             {mode === 'tutor' ? <Text style={styles.progressScore}>· Score {score}</Text> : null}
+            <Pressable
+              onPress={() => void shareQuiz()}
+              disabled={sharing}
+              hitSlop={8}
+              accessibilityLabel="Share this quiz"
+            >
+              <Ionicons name="share-outline" size={16} color={colors.accent} />
+            </Pressable>
           </View>
         </View>
         <View style={styles.progressBar}>
           <View style={[styles.progressFill, { width: `${progress}%` }]} />
         </View>
+        {shareNote ? (
+          <Text style={{ color: colors.accent, fontSize: 12, marginTop: 4 }}>{shareNote}</Text>
+        ) : null}
 
         {error ? <ErrorBanner message={error} /> : null}
 

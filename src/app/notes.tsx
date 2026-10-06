@@ -11,6 +11,7 @@ import { Button, EmptyState, ErrorBanner, Input, LoadingView } from '@/component
 import { getAllNotes, type LibraryNote } from '@/lib/api';
 import { exportNotesMarkdown } from '@/lib/exportNotes';
 import { HIGHLIGHT_DOTS, type HighlightColor } from '@/lib/highlight-colors';
+import { shareContent } from '@/lib/share';
 import { colors } from '@/theme';
 
 export default function NotesScreen() {
@@ -19,6 +20,7 @@ export default function NotesScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [shareMessage, setShareMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -35,6 +37,15 @@ export default function NotesScreen() {
       void load();
     }, [load]),
   );
+
+  const shareNote = async (note: LibraryNote) => {
+    try {
+      const { method } = await shareContent('note', note.id, 'Athena highlight');
+      setShareMessage(method === 'copied' ? 'Link copied to the clipboard.' : null);
+    } catch (err) {
+      setShareMessage(err instanceof Error ? err.message : 'Could not create the link.');
+    }
+  };
 
   const query = search.trim().toLowerCase();
   const filtered = useMemo(
@@ -78,6 +89,11 @@ export default function NotesScreen() {
               />
             ) : null}
           </View>
+          {shareMessage ? (
+            <Text style={{ color: colors.accent, fontSize: 12, marginBottom: 6 }}>
+              {shareMessage}
+            </Text>
+          ) : null}
           {error ? <ErrorBanner message={error} /> : null}
           {notes.length === 0 ? (
             <EmptyState
@@ -118,6 +134,16 @@ export default function NotesScreen() {
                     <Text style={styles.rowMeta} numberOfLines={1}>
                       {note.book_title} · Ch. {note.chapter_number} · {note.chapter_title}
                     </Text>
+                    <Pressable
+                      hitSlop={8}
+                      accessibilityLabel="Share this highlight"
+                      onPress={(event) => {
+                        event.stopPropagation();
+                        void shareNote(note);
+                      }}
+                    >
+                      <Ionicons name="share-outline" size={15} color={colors.accent} />
+                    </Pressable>
                     <Ionicons name="arrow-forward" size={14} color={colors.textMuted} />
                   </View>
                   {note.kind === 'note' && note.note ? (

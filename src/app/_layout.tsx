@@ -68,6 +68,7 @@ function RootNavigator() {
       }}
     >
       <Stack.Screen name="index" />
+      <Stack.Screen name="s/[token]" options={{ ...headerOptions, title: 'Shared with you' }} />
       <Stack.Protected guard={!session}>
       <Stack.Screen name="(auth)" />
       </Stack.Protected>

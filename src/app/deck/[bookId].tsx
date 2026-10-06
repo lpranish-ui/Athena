@@ -12,6 +12,7 @@ import { Button, EmptyState, ErrorBanner, LoadingView } from '@/components/ui';
 import { getDeckCards, gradeCard, type DeckCard } from '@/lib/api';
 import { api } from '@/lib/apiClient';
 import { gradePreview, isDue, scheduleCard, type FlashcardGrade } from '@/lib/review';
+import { shareContent } from '@/lib/share';
 import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 
 const GRADES: { grade: FlashcardGrade; label: string; key: string; color: string }[] = [
@@ -32,6 +33,8 @@ export default function DeckSessionScreen() {
   const [queue, setQueue] = useState<DeckCard[]>([]);
   const [revealed, setRevealed] = useState(false);
   const [reviewed, setReviewed] = useState(0);
+  const [sharingDeck, setSharingDeck] = useState(false);
+  const [shareNote, setShareNote] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!bookId) return;
@@ -58,6 +61,19 @@ export default function DeckSessionScreen() {
   );
 
   const current = queue[0] ?? null;
+
+  const shareDeck = async () => {
+    if (!bookId) return;
+    try {
+      setSharingDeck(true);
+      const { method } = await shareContent('deck', bookId, bookTitle || 'Shared deck');
+      setShareNote(method === 'copied' ? 'Link copied to the clipboard.' : null);
+    } catch (err) {
+      setShareNote(err instanceof Error ? err.message : 'Could not create the link.');
+    } finally {
+      setSharingDeck(false);
+    }
+  };
   const done = !loading && cards.length > 0 && current === null;
 
   const applyGrade = (grade: FlashcardGrade) => {
@@ -183,10 +199,21 @@ export default function DeckSessionScreen() {
           <Text style={styles.context} numberOfLines={1}>
             {current.topic ?? 'Review'}
           </Text>
+          <Pressable
+            onPress={() => void shareDeck()}
+            disabled={sharingDeck}
+            hitSlop={8}
+            accessibilityLabel="Share this deck"
+          >
+            <Ionicons name="share-outline" size={16} color={colors.accent} />
+          </Pressable>
           <Text style={styles.count}>
             {reviewed} done · {queue.length} left
           </Text>
         </View>
+        {shareNote ? (
+          <Text style={{ color: colors.accent, fontSize: 12 }}>{shareNote}</Text>
+        ) : null}
 
         <Pressable onPress={() => setRevealed(true)} style={styles.cardBox}>
           <Text style={styles.front}>{current.front}</Text>

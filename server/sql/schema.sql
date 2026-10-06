@@ -373,6 +373,17 @@ create table if not exists upload_sessions (
 );
 create index if not exists upload_sessions_queue_idx on upload_sessions(status,updated_at);
 create index if not exists upload_sessions_user_idx on upload_sessions(user_id,status);
+
+-- Read-only snapshots shared by public link (quiz / deck / highlight + note).
+create table if not exists share_links (
+  id uuid primary key default gen_random_uuid(),
+  token text not null unique,
+  user_id uuid not null references users (id) on delete cascade,
+  kind text not null check (kind in ('set', 'deck', 'note')),
+  payload jsonb not null,
+  views int not null default 0,
+  created_at timestamptz not null default now()
+);
 create table if not exists upload_chunks (
   book_id uuid not null references upload_sessions(book_id) on delete cascade,
   byte_offset bigint not null check (byte_offset >= 0),

@@ -3,6 +3,7 @@ import express from 'express';
 import { createAiLimiter } from './ai-limit.js';
 import { answerQuestion as defaultAnswerQuestion } from './ask.js';
 import { registerAuthRoutes, requireAuth } from './auth.js';
+import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { createChapterService } from './chapters.js';
 import * as defaultDatabase from './db.js';
 import { generateMcqs as defaultGenerateMcqs, replaceQuestion as defaultReplaceQuestion } from './generate.js';
@@ -43,6 +44,9 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
   // Public auth routes.
   registerAuthentication(app, { database });
 
+  // Public share links (read-only snapshots) — must precede the auth gate.
+  registerPublicShareRoutes(app, { database });
+
   // Everything else under /api requires a signed-in user.
   app.use('/api', (req, res, next) => {
     if (req.path.startsWith('/auth/') || req.path === '/health') {
@@ -55,6 +59,7 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
   // Multiplayer group-study routes (a signed-in user is required).
   registerGroupRoutes(app, { database });
   registerUploadRoutes(app, { database });
+  registerShareRoutes(app, { database });
   if (aiLimiter) {
     app.use('/api/ai', aiLimiter);
     app.use('/api/books/:id/ask', aiLimiter);
