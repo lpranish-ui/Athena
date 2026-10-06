@@ -52,3 +52,4 @@ perf*.txt
 bootlog.txt
 
 smoke*.txt
+__pycache__/
