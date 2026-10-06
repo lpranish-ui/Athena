@@ -325,3 +325,15 @@ create table if not exists reader_notes (
 );
 
 create index if not exists reader_notes_book_idx on reader_notes (user_id, book_id, created_at desc);
+
+-- ----------------------------------------------------------------------------
+-- in-book search: trigram index so ILIKE '%term%' stays fast on big books
+-- (wrapped so a missing extension never breaks boot)
+-- ----------------------------------------------------------------------------
+do $$
+begin
+  create extension if not exists pg_trgm;
+  create index if not exists chapters_content_trgm_idx on chapters using gin (content gin_trgm_ops);
+exception when others then
+  raise notice 'pg_trgm index skipped: %', sqlerrm;
+end $$;
