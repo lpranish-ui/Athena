@@ -43,3 +43,10 @@ example
 # generated native folders
 /ios
 /android
+
+# local debug scratch files
+tc*.txt
+lint*.txt
+slog.txt
+perf.txt
+bootlog.txt
