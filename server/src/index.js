@@ -1212,26 +1212,20 @@ app.get('/api/books/:id/search', async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim().slice(0, 80) : '';
     if (q.length < 2) throw new HttpError(400, 'Type at least 2 characters to search.');
 
-    // ILIKE runs against the chapters_content_trgm_idx trigram index (see
-    // boot code). The planner can't see TOAST read costs for big chapters and
-    // otherwise keeps choosing a seq scan, so force the index inside a
-    // scoped transaction. Escape LIKE wildcards in the user's query.
+    // ILIKE runs against the chapters_content_trgm_idx trigram index (schema.sql);
+    // escape LIKE wildcards in the user's query. position() gives the offset.
     const pattern = `%${q.replace(/([\\%_])/g, '\\$1')}%`;
-    const rows = await withTransaction(async (client) => {
-      await client.query('set local enable_seqscan = off');
-      const result = await client.query(
-        `select c.id as chapter_id, c.number, c.title,
-                position(lower($3) in lower(c.content)) as position,
-                ((length(c.content) - length(replace(lower(c.content), lower($3), ''))) / length($3))::int as hits,
-                substring(c.content from greatest(position(lower($3) in lower(c.content)) - 80, 1) for 220) as snippet
-           from chapters c
-          where c.book_id = $1 and c.content ilike $2
-          order by c.number
-          limit 30`,
-        [req.params.id, pattern, q],
-      );
-      return result.rows;
-    });
+    const rows = await many(
+      `select c.id as chapter_id, c.number, c.title,
+              position(lower($3) in lower(c.content)) as position,
+              ((length(c.content) - length(replace(lower(c.content), lower($3), ''))) / length($3))::int as hits,
+              substring(c.content from greatest(position(lower($3) in lower(c.content)) - 80, 1) for 220) as snippet
+         from chapters c
+        where c.book_id = $1 and c.content ilike $2
+        order by c.number
+        limit 30`,
+      [req.params.id, pattern, q],
+    );
     res.json({ query: q, results: rows });
   } catch (error) {
     handle(res, error, 'Could not search this book.');
