@@ -81,3 +81,59 @@ export function summarizeProgress({ attempts = [], sets = [], questions = [] } =
     recent,
   };
 }
+
+// ── study streaks ────────────────────────────────────────────────────────────
+
+const STREAK_WINDOW_DAYS = 14;
+const DAY_MS = 86_400_000;
+
+function dayKey(dateMs) {
+  return new Date(dateMs).toISOString().slice(0, 10);
+}
+
+/**
+ * Turns the distinct days with activity (quiz, review, reading, notes — as
+ * 'YYYY-MM-DD' strings) into a streak summary. Pure so it can be unit-tested;
+ * `today` is injected by the route so "now" stays out of the function.
+ */
+export function summarizeStreak({ activeDays = [], today } = {}) {
+  const anchorMs = Date.parse(`${today}T00:00:00Z`);
+  const active = new Set(
+    activeDays.filter((day) => Number.isFinite(Date.parse(`${day}T00:00:00Z`))),
+  );
+
+  // Current streak: consecutive days ending today — or yesterday while today
+  // is still open, so the flame does not reset before the day is over.
+  let current = 0;
+  let cursor = anchorMs;
+  if (!active.has(dayKey(cursor))) cursor -= DAY_MS;
+  while (Number.isFinite(cursor) && active.has(dayKey(cursor))) {
+    current += 1;
+    cursor -= DAY_MS;
+  }
+
+  // Best streak across everything on record.
+  let best = 0;
+  let run = 0;
+  let previousMs = null;
+  for (const day of [...active].sort()) {
+    const ms = Date.parse(`${day}T00:00:00Z`);
+    run = previousMs !== null && ms - previousMs === DAY_MS ? run + 1 : 1;
+    if (run > best) best = run;
+    previousMs = ms;
+  }
+
+  // The last two weeks, oldest first, for the little grid.
+  const days = [];
+  for (let offset = STREAK_WINDOW_DAYS - 1; offset >= 0; offset -= 1) {
+    const ms = anchorMs - offset * DAY_MS;
+    days.push({ day: dayKey(ms), active: active.has(dayKey(ms)) });
+  }
+
+  return {
+    current,
+    best: Math.max(best, current),
+    activeToday: active.has(dayKey(anchorMs)),
+    days,
+  };
+}

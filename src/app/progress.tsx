@@ -55,11 +55,12 @@ export default function ProgressScreen() {
   }
 
   const totals = summary?.totals;
+  const streak = summary?.streak ?? null;
 
   return (
     <Screen>
       <Stack.Screen options={{ title: 'Progress' }} />
-      {!summary || !totals || totals.attempts === 0 ? (
+      {!summary || !totals || (totals.attempts === 0 && (streak?.current ?? 0) === 0) ? (
         <EmptyState
           icon="stats-chart-outline"
           title="No data yet"
@@ -83,6 +84,36 @@ export default function ProgressScreen() {
               <Text style={styles.statLabel}>quiz time</Text>
             </Card>
           </View>
+
+          {streak ? (
+            <Card style={styles.streakCard}>
+              <View style={styles.streakHeader}>
+                <Ionicons
+                  name="flame"
+                  size={22}
+                  color={streak.current > 0 ? '#FB923C' : colors.textMuted}
+                />
+                <View style={styles.streakText}>
+                  <Text style={styles.streakTitle}>
+                    {streak.current > 0 ? `${streak.current}-day streak` : 'Start a streak'}
+                  </Text>
+                  <Text style={styles.streakMeta}>
+                    {streak.activeToday
+                      ? `Best ${streak.best} day${streak.best === 1 ? '' : 's'} — you studied today`
+                      : `Best ${streak.best} day${streak.best === 1 ? '' : 's'} — a quiz, review or reading today keeps it going`}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.streakDots}>
+                {streak.days.map((entry) => (
+                  <View
+                    key={entry.day}
+                    style={[styles.streakDot, entry.active && styles.streakDotActive]}
+                  />
+                ))}
+              </View>
+            </Card>
+          ) : null}
 
           <Text style={styles.sectionTitle}>Weak areas</Text>
           {summary.topics.length === 0 ? (
@@ -113,6 +144,8 @@ export default function ProgressScreen() {
             </Card>
           )}
 
+          {summary.books.length > 0 ? (
+          <>
           <Text style={styles.sectionTitle}>By book</Text>
           <Card style={styles.listCard}>
             {summary.books.map((book) => (
@@ -133,7 +166,11 @@ export default function ProgressScreen() {
               </View>
             ))}
           </Card>
+          </>
+          ) : null}
 
+          {summary.recent.length > 0 ? (
+          <>
           <Text style={styles.sectionTitle}>Recent attempts</Text>
           <Card style={styles.listCard}>
             {summary.recent.map((attempt, index) => {
@@ -162,6 +199,8 @@ export default function ProgressScreen() {
               );
             })}
           </Card>
+          </>
+          ) : null}
         </ScrollView>
       )}
     </Screen>
@@ -174,6 +213,19 @@ const styles = StyleSheet.create({
   statCard: { flex: 1, alignItems: 'center', gap: 2, paddingVertical: 14 },
   statValue: { color: colors.text, fontSize: fontSize.lg, fontWeight: '800' },
   statLabel: { color: colors.textMuted, fontSize: fontSize.xs },
+  streakCard: { gap: 12, paddingVertical: 14 },
+  streakHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  streakText: { flex: 1, gap: 2 },
+  streakTitle: { color: colors.text, fontWeight: '800', fontSize: fontSize.md },
+  streakMeta: { color: colors.textMuted, fontSize: fontSize.xs },
+  streakDots: { flexDirection: 'row', gap: 5 },
+  streakDot: {
+    flex: 1,
+    height: 8,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceAlt,
+  },
+  streakDotActive: { backgroundColor: '#FB923C' },
   sectionTitle: {
     color: colors.textMuted,
     fontSize: fontSize.xs,

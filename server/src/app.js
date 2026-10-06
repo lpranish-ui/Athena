@@ -9,7 +9,7 @@ import { generateMcqs as defaultGenerateMcqs, replaceQuestion as defaultReplaceQ
 import { registerGroupRoutes } from './group.js';
 import { HttpError } from './http.js';
 import { IngestError, ingestFile as defaultIngestFile, ingestText as defaultIngestText } from './ingest.js';
-import { summarizeProgress } from './progress.js';
+import { summarizeProgress, summarizeStreak } from './progress.js';
 import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
 import { registerUploadRoutes } from './uploads.js';
@@ -682,7 +682,33 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
         ? await many('select id, topic, correct_index from mcqs where id = any($1)', [questionIds])
         : [];
 
-      res.json(summarizeProgress({ attempts, sets, questions }));
+      // Every kind of study counts towards the streak.
+      const activeRows = await many(
+        `select day::text as day from (
+           select (completed_at at time zone 'utc')::date as day from quiz_attempts
+            where user_id = $1 and completed_at is not null
+           union
+           select (last_reviewed_at at time zone 'utc')::date from flashcards
+            where user_id = $1 and last_reviewed_at is not null
+           union
+           select (updated_at at time zone 'utc')::date from reading_progress
+            where user_id = $1
+           union
+           select (created_at at time zone 'utc')::date from reader_notes
+            where user_id = $1
+         ) activity
+         order by day desc
+         limit 400`,
+        [req.user.id],
+      );
+
+      res.json({
+        ...summarizeProgress({ attempts, sets, questions }),
+        streak: summarizeStreak({
+          activeDays: activeRows.map((row) => row.day),
+          today: new Date().toISOString().slice(0, 10),
+        }),
+      });
     } catch (error) {
       handle(res, error, 'Could not load the progress dashboard.');
     }

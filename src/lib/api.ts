@@ -353,6 +353,12 @@ export interface ProgressSummary {
     mode: string;
     completed_at: string | null;
   }[];
+  streak: {
+    current: number;
+    best: number;
+    activeToday: boolean;
+    days: { day: string; active: boolean }[];
+  };
 }
 
 /** Loads the progress dashboard (null when unavailable — never blocks a screen). */

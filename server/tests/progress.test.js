@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { summarizeProgress } from '../src/progress.js';
+import { summarizeProgress, summarizeStreak } from '../src/progress.js';
 
 const sets = [{ id: 'set-1', set_title: 'Cardio quiz', book_title: 'Cardio' }];
 const questions = [
@@ -101,4 +101,44 @@ test('topics with a single answer stay out of weak areas', () => {
   });
 
   assert.equal(summary.topics.length, 0);
+});
+
+test('streaks count consecutive days ending today or yesterday', () => {
+  const streak = summarizeStreak({
+    activeDays: ['2026-10-06', '2026-10-05', '2026-10-04', '2026-09-30'],
+    today: '2026-10-06',
+  });
+  assert.equal(streak.current, 3);
+  assert.equal(streak.activeToday, true);
+  assert.equal(streak.best, 3);
+  assert.equal(streak.days.length, 14);
+  assert.equal(streak.days[13].day, '2026-10-06');
+  assert.equal(streak.days[13].active, true);
+
+  // Nothing today yet — yesterday keeps the streak alive.
+  const pending = summarizeStreak({
+    activeDays: ['2026-10-05', '2026-10-04'],
+    today: '2026-10-06',
+  });
+  assert.equal(pending.current, 2);
+  assert.equal(pending.activeToday, false);
+
+  // A gap resets the current streak but keeps the best one.
+  const broken = summarizeStreak({
+    activeDays: ['2026-10-01', '2026-09-30', '2026-09-29', '2026-09-28'],
+    today: '2026-10-06',
+  });
+  assert.equal(broken.current, 0);
+  assert.equal(broken.best, 4);
+});
+
+test('streaks ignore invalid day strings and handle an empty history', () => {
+  const empty = summarizeStreak({ activeDays: [], today: '2026-10-06' });
+  assert.equal(empty.current, 0);
+  assert.equal(empty.best, 0);
+  assert.equal(empty.days.filter((entry) => entry.active).length, 0);
+
+  const junk = summarizeStreak({ activeDays: ['not-a-day', '2026-10-06'], today: '2026-10-06' });
+  assert.equal(junk.current, 1);
+  assert.equal(junk.best, 1);
 });
