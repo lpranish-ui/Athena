@@ -25,11 +25,13 @@ import {
 import { LoadingView } from '@/components/ui';
 import {
   addReaderNote,
+  askBook,
   deleteReaderNote,
   getReaderNotes,
   getReadingProgress,
   saveReadingProgress,
   searchBook,
+  type BookAnswer,
   type BookSearchHit,
   type ReaderNote,
 } from '@/lib/api';
@@ -104,6 +106,11 @@ export default function ReaderScreen() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<BookSearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [askMode, setAskMode] = useState<'search' | 'ask'>('search');
+  const [askQuestion, setAskQuestion] = useState('');
+  const [askAnswer, setAskAnswer] = useState<BookAnswer | null>(null);
+  const [asking, setAsking] = useState(false);
+  const [askError, setAskError] = useState<string | null>(null);
 
   const scrollRef = useRef<ScrollView>(null);
   const pendingScrollRef = useRef<number | null>(null);
@@ -483,6 +490,27 @@ export default function ReaderScreen() {
       pendingSearchRef.current = { chapterId: hit.chapter_id, needle };
       setIndex(targetIndex);
     }
+  };
+
+  const runAsk = async () => {
+    const question = askQuestion.trim();
+    if (!bookId || question.length < 4 || asking) return;
+    setAsking(true);
+    setAskError(null);
+    try {
+      setAskAnswer(await askBook(bookId, question));
+    } catch (err) {
+      setAskError(err instanceof Error ? err.message : 'Could not answer that right now.');
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  const jumpToSource = (chapterId: string) => {
+    const targetIndex = chapters.findIndex((entry) => entry.id === chapterId);
+    setSearchOpen(false);
+    if (targetIndex < 0) return;
+    jumpToChapter(targetIndex);
   };
 
   // ── rendering ─────────────────────────────────────────────────────────────
@@ -890,50 +918,138 @@ export default function ReaderScreen() {
       <Modal visible={searchOpen} transparent animationType="slide" onRequestClose={() => setSearchOpen(false)}>
         <Pressable style={styles.modalBackdrop} onPress={() => setSearchOpen(false)} />
         <View style={[styles.sheet, styles.chapterSheet, { backgroundColor: theme.chrome, borderColor: theme.border }]}>
-          <Text style={[styles.sheetTitle, { color: theme.text }]}>Search this book</Text>
-          <TextInput
-            value={searchQuery}
-            onChangeText={handleSearchText}
-            placeholder="Type at least 2 letters..."
-            placeholderTextColor={theme.muted}
-            autoFocus
-            autoCorrect={false}
-            style={[styles.noteInput, styles.searchInput, { color: theme.text, borderColor: theme.border }]}
-          />
-          {searching ? <ActivityIndicator color={theme.muted} style={{ paddingVertical: 14 }} /> : null}
-          {!searching && searchResults !== null ? (
-            searchResults.length === 0 ? (
-              <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
-                No matches for “{searchQuery.trim()}”.
+          <View style={styles.modeRow}>
+            <Pressable
+              style={[
+                styles.modeChip,
+                { borderColor: theme.border },
+                askMode === 'search' && styles.modeChipActive,
+              ]}
+              onPress={() => setAskMode('search')}
+            >
+              <Text style={{ color: askMode === 'search' ? theme.text : theme.muted, fontWeight: '700' }}>
+                🔎 Search
               </Text>
-            ) : (
-              <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
-                {searchResults.map((hit) => (
-                  <Pressable
-                    key={hit.chapter_id}
-                    style={[styles.noteRow, { borderColor: theme.border }]}
-                    onPress={() => jumpToSearchHit(hit)}
-                  >
-                    <View style={styles.flex}>
-                      <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>
-                        Ch. {hit.number} · {hit.title}
-                        {hit.hits > 1 ? ` · ${hit.hits} matches` : ''}
-                      </Text>
-                      <Text style={{ color: theme.text, marginTop: 4, lineHeight: 20 }} numberOfLines={2}>
-                        {hit.snippet.replace(/\s+/g, ' ').trim()}
-                      </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.modeChip,
+                { borderColor: theme.border },
+                askMode === 'ask' && styles.modeChipActive,
+              ]}
+              onPress={() => setAskMode('ask')}
+            >
+              <Text style={{ color: askMode === 'ask' ? theme.text : theme.muted, fontWeight: '700' }}>
+                ✨ Ask Athena
+              </Text>
+            </Pressable>
+          </View>
+          {askMode === 'search' ? (
+            <>
+              <TextInput
+                value={searchQuery}
+                onChangeText={handleSearchText}
+                placeholder="Type at least 2 letters..."
+                placeholderTextColor={theme.muted}
+                autoFocus
+                autoCorrect={false}
+                style={[styles.noteInput, styles.searchInput, { color: theme.text, borderColor: theme.border }]}
+              />
+              {searching ? <ActivityIndicator color={theme.muted} style={{ paddingVertical: 14 }} /> : null}
+              {!searching && searchResults !== null ? (
+                searchResults.length === 0 ? (
+                  <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
+                    No matches for “{searchQuery.trim()}”.
+                  </Text>
+                ) : (
+                  <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
+                    {searchResults.map((hit) => (
+                      <Pressable
+                        key={hit.chapter_id}
+                        style={[styles.noteRow, { borderColor: theme.border }]}
+                        onPress={() => jumpToSearchHit(hit)}
+                      >
+                        <View style={styles.flex}>
+                          <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>
+                            Ch. {hit.number} · {hit.title}
+                            {hit.hits > 1 ? ` · ${hit.hits} matches` : ''}
+                          </Text>
+                          <Text style={{ color: theme.text, marginTop: 4, lineHeight: 20 }} numberOfLines={2}>
+                            {hit.snippet.replace(/\s+/g, ' ').trim()}
+                          </Text>
+                        </View>
+                        <Ionicons name="arrow-forward" size={16} color={theme.muted} />
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                )
+              ) : null}
+              {!searching && searchResults === null ? (
+                <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
+                  Find a word or phrase anywhere in the book — results jump straight to the passage.
+                </Text>
+              ) : null}
+            </>
+          ) : (
+            <>
+              <TextInput
+                value={askQuestion}
+                onChangeText={setAskQuestion}
+                placeholder="e.g. How does the cardiac cycle relate to the ECG?"
+                placeholderTextColor={theme.muted}
+                multiline
+                style={[styles.noteInput, { color: theme.text, borderColor: theme.border }]}
+              />
+              <Pressable
+                style={[
+                  styles.choiceChip,
+                  { borderColor: '#6D8BFF', backgroundColor: 'rgba(109,139,255,0.16)', alignItems: 'center' },
+                ]}
+                disabled={asking || askQuestion.trim().length < 4}
+                onPress={() => void runAsk()}
+              >
+                <Text style={{ color: theme.text, fontWeight: '700' }}>
+                  {asking ? 'Reading the book… (up to ~30s)' : 'Ask Athena'}
+                </Text>
+              </Pressable>
+              {asking ? <ActivityIndicator color={theme.muted} style={{ paddingVertical: 10 }} /> : null}
+              {askError && !asking ? (
+                <Text style={{ color: '#E5484D', lineHeight: 20 }}>{askError}</Text>
+              ) : null}
+              {askAnswer && !asking ? (
+                <ScrollView style={styles.flex} showsVerticalScrollIndicator={false}>
+                  <Text style={{ color: theme.text, lineHeight: 22, marginTop: 4 }}>
+                    {askAnswer.answer}
+                  </Text>
+                  {askAnswer.sources.length > 0 ? (
+                    <View style={styles.sourceRow}>
+                      <Text style={{ color: theme.muted, fontSize: 11, fontWeight: '700' }}>From</Text>
+                      {askAnswer.sources.map((source) => (
+                        <Pressable
+                          key={source.chapter_id}
+                          style={[styles.sourceChip, { borderColor: theme.border }]}
+                          onPress={() => jumpToSource(source.chapter_id)}
+                        >
+                          <Text style={{ color: theme.text, fontSize: 12, fontWeight: '600' }}>
+                            Ch. {source.number}
+                          </Text>
+                        </Pressable>
+                      ))}
                     </View>
-                    <Ionicons name="arrow-forward" size={16} color={theme.muted} />
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )
-          ) : null}
-          {!searching && searchResults === null ? (
-            <Text style={{ color: theme.muted, paddingVertical: 12, lineHeight: 20 }}>
-              Find a word or phrase anywhere in the book — results jump straight to the passage.
-            </Text>
-          ) : null}
+                  ) : null}
+                  <Text style={{ color: theme.muted, fontSize: 11, marginTop: 10, lineHeight: 16 }}>
+                    Answers come only from this book’s text — always double-check clinical details.
+                  </Text>
+                </ScrollView>
+              ) : null}
+              {!askAnswer && !asking && !askError ? (
+                <Text style={{ color: theme.muted, paddingVertical: 6, lineHeight: 20 }}>
+                  Ask anything about this book. Athena answers from the book’s own text and cites
+                  the chapters it used — tap a citation to jump there.
+                </Text>
+              ) : null}
+            </>
+          )}
         </View>
       </Modal>
 
@@ -1136,4 +1252,9 @@ const styles = StyleSheet.create({
   },
   noteDelete: { padding: 8 },
   searchInput: { minHeight: 46, paddingVertical: 10 },
+  modeRow: { flexDirection: 'row', gap: 8 },
+  modeChip: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 10, borderWidth: 1 },
+  modeChipActive: { borderColor: '#6D8BFF', backgroundColor: 'rgba(109,139,255,0.16)' },
+  sourceRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginTop: 10, gap: 6 },
+  sourceChip: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, borderWidth: 1 },
 });

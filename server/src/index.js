@@ -12,6 +12,7 @@ import cors from 'cors';
 import express from 'express';
 
 import { registerAuthRoutes, requireAuth } from './auth.js';
+import { answerQuestion } from './ask.js';
 import { many, one, query, withTransaction } from './db.js';
 import { generateMcqs, replaceQuestion } from './generate.js';
 import { registerGroupRoutes } from './group.js';
@@ -1229,6 +1230,21 @@ app.get('/api/books/:id/search', async (req, res) => {
     res.json({ query: q, results: rows });
   } catch (error) {
     handle(res, error, 'Could not search this book.');
+  }
+});
+
+// ── ask this book ─────────────────────────────────────────────────────────────
+
+app.post('/api/books/:id/ask', async (req, res) => {
+  try {
+    const result = await answerQuestion({
+      userId: req.user.id,
+      bookId: req.params.id,
+      question: req.body?.question,
+    });
+    res.json(result);
+  } catch (error) {
+    handle(res, error, 'Could not answer that right now.');
   }
 });
 

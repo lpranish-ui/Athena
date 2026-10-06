@@ -228,6 +228,24 @@ export async function searchBook(bookId: string, query: string): Promise<BookSea
   return result.results;
 }
 
+/** One chapter the tutor used when answering a question. */
+export interface BookAnswerSource {
+  chapter_id: string;
+  number: number;
+  title: string;
+}
+
+/** A grounded answer from the book's own text, plus the chapters it drew on. */
+export interface BookAnswer {
+  answer: string;
+  sources: BookAnswerSource[];
+}
+
+/** Asks a question about one book; the answer is built only from its text. */
+export async function askBook(bookId: string, question: string): Promise<BookAnswer> {
+  return api.post<BookAnswer>(`/api/books/${bookId}/ask`, { question });
+}
+
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
   try {
