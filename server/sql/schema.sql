@@ -393,3 +393,67 @@ create table if not exists upload_chunks (
   primary key (book_id,byte_offset),
   check (octet_length(data) = byte_length)
 );
+
+-- Curriculum coach MVP: stable concept evidence and private, resumable daily plans.
+-- The API enforces ownership; question answer keys never appear in ungraded responses.
+create table if not exists study_enrollments (
+  user_id uuid primary key references users(id) on delete cascade,
+  course_id text not null,
+  daily_minutes int not null check (daily_minutes between 10 and 60),
+  exam_date date,
+  timezone text not null default 'UTC',
+  updated_at timestamptz not null default now()
+);
+create table if not exists study_concept_progress (
+  user_id uuid not null references users(id) on delete cascade,
+  course_id text not null,
+  concept_id text not null,
+  state jsonb not null,
+  updated_at timestamptz not null default now(),
+  primary key (user_id,course_id,concept_id)
+);
+create table if not exists study_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  course_id text not null,
+  course_title text not null,
+  pack_version text not null,
+  pack_snapshot jsonb not null,
+  local_date date not null,
+  timezone text not null,
+  daily_minutes int not null check (daily_minutes between 10 and 60),
+  steps jsonb not null,
+  status text not null default 'active' check (status in ('active','completed')),
+  created_at timestamptz not null default now(),
+  completed_at timestamptz,
+  unique (user_id,course_id,local_date)
+);
+create index if not exists study_sessions_user_idx on study_sessions(user_id,course_id,local_date desc);
+create table if not exists study_step_answers (
+  session_id uuid not null references study_sessions(id) on delete cascade,
+  step_id text not null,
+  option_index int check (option_index >= 0),
+  confidence text check (confidence in ('unsure','okay','confident')),
+  correct boolean,
+  feedback jsonb,
+  answered_at timestamptz not null default now(),
+  primary key (session_id,step_id)
+);
+create table if not exists study_mistakes (
+  user_id uuid not null references users(id) on delete cascade,
+  course_id text not null,
+  concept_id text not null,
+  question_id text not null,
+  concept_title text not null,
+  question text not null,
+  selected_option text not null,
+  correct_option text not null,
+  explanation text not null,
+  misconception text not null,
+  confidence text not null check (confidence in ('unsure','okay','confident')),
+  sources jsonb not null,
+  created_at timestamptz not null default now(),
+  resolved boolean not null default false,
+  primary key (user_id,course_id,question_id)
+);
+create index if not exists study_mistakes_user_idx on study_mistakes(user_id,course_id,resolved,created_at desc);

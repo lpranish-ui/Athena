@@ -16,6 +16,7 @@ RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY src ./src
 COPY sql ./sql
+COPY data ./data
 
 ENV NODE_ENV=production
 EXPOSE 10000

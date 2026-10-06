@@ -6,6 +6,11 @@ iOS; a Node API and PostgreSQL store accounts and study progress.
 
 ## Features
 
+- **Today study coach:** enroll in a pilot course, choose a daily time budget,
+  follow a resumable lesson/practice session, and track syllabus coverage.
+- **Mistake journal:** wrong answers retain the chosen option, confidence,
+  targeted explanation and sources; later sessions prioritize repair with
+  different question variants.
 - **Personal library:** private uploads, shared starter material and subject filters.
 - **Reader:** light/dark/sepia themes, adjustable typography, saved positions,
   highlights, notes and navigation to distant passages.
@@ -177,6 +182,30 @@ signing. For the existing EAS preview profile, use
 ([EAS setup](https://docs.expo.dev/build/setup/)).
 
 Future work includes broader licensed starter material, an admin question-review
-dashboard and offline study. Replace the Expo placeholder icons before release.
+dashboard and offline question sessions with synchronization. Offline book-text
+reading is already available. Replace the Expo placeholder icons before release.
 Ship original or appropriately licensed default content, and keep provider/JWT
 secrets in the server environment.
+
+## Study-coach MVP
+
+The signed-in landing page is **Today**. Choose **Cardiovascular Foundations**,
+set a daily budget and optional exam date, and start a session. The pilot has
+eight objectives and 24 original questions; it runs without an AI key or book
+upload. The course page contains the objective map, short lessons, sources and
+plan settings. The mistake journal explains missed questions and shows which
+mistakes have been repaired. Existing library, reader, quizzes and decks remain
+available in the tabs.
+
+Pilot material is explicitly marked **Editorial review pending**. It has not
+received faculty approval, and the app does not predict examination pass rates.
+Original content and linked references are recorded in
+`server/data/course-packs/cardiovascular-foundations.json`. Downloaded PDFs on
+the Desktop are not bundled into the app.
+
+Enrollments, concept progress, session snapshots and answers are stored in
+PostgreSQL. Session creation uses the enrollment's timezone; interrupted sessions
+can resume, and repeated submissions do not create duplicate answers. Server-side
+grading controls the result. The course API lives under `/api/study/` and requires
+authentication. Its additive tables are bootstrapped by the existing schema
+startup. Course-pack data is included in the API Docker image.

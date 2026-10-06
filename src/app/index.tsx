@@ -10,5 +10,5 @@ export default function Index() {
     return <LoadingView />;
   }
 
-  return <Redirect href={session ? '/library' : '/sign-in'} />;
+  return <Redirect href={session ? '/today' : '/sign-in'} />;
 }

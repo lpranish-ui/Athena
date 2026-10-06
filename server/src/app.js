@@ -12,6 +12,7 @@ import { IngestError, ingestFile as defaultIngestFile, ingestText as defaultInge
 import { summarizeProgress, summarizeStreak } from './progress.js';
 import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
+import { registerStudyRoutes } from './study.js';
 import { registerUploadRoutes } from './uploads.js';
 
 /** Construct routes without connecting to a database or opening a listening socket. */
@@ -60,6 +61,7 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
   registerGroupRoutes(app, { database });
   registerUploadRoutes(app, { database });
   registerShareRoutes(app, { database });
+  registerStudyRoutes(app, { database, now: services.studyNow, loadPacks: services.studyPacks });
   if (aiLimiter) {
     app.use('/api/ai', aiLimiter);
     app.use('/api/books/:id/ask', aiLimiter);

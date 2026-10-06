@@ -7,7 +7,7 @@ export default function AuthLayout() {
   const { session } = useAuth();
 
   if (session) {
-    return <Redirect href="/library" />;
+    return <Redirect href="/today" />;
   }
 
   return (
