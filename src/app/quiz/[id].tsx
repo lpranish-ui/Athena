@@ -278,6 +278,7 @@ export default function QuizScreen() {
         score: finalScore,
         total: mcqs.length,
         answers: final,
+        question_ids: mcqs.map((mcq) => mcq.id),
         mode,
         duration_seconds: getElapsed(),
       });

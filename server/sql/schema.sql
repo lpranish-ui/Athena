@@ -131,6 +131,9 @@ create table if not exists quiz_attempts (
 
 create index if not exists quiz_attempts_user_idx on quiz_attempts (user_id, completed_at desc);
 
+-- Question ids in the answered order, for topic-level progress analytics.
+alter table quiz_attempts add column if not exists question_ids jsonb;
+
 -- ----------------------------------------------------------------------------
 -- flags: questions a student reported (hidden for that student afterwards)
 -- ----------------------------------------------------------------------------

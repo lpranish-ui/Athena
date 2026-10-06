@@ -528,7 +528,7 @@ export default function ReaderScreen() {
           CellRendererComponent={ReaderCell}
           keyExtractor={(_paragraph, paragraphIndex) => String(paragraphIndex)}
           initialNumToRender={6}
-          maxToRenderPerBatch={6}
+          maxToRenderPerBatch={Platform.OS === 'web' ? 12 : 6}
           windowSize={7}
           style={styles.flex}
           contentContainerStyle={styles.readingContent}

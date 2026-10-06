@@ -24,6 +24,7 @@ export function useReaderPosition(bookId: string) {
   const averageHeightRef = useRef(0);
   const resumeAnchorRef = useRef<ParagraphAnchor | null>(null);
   const lastAppliedOffsetRef = useRef<number | null>(null);
+  const positioningDeadlineRef = useRef(0);
   const lastSaveRef = useRef(0);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const finishTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -33,8 +34,10 @@ export function useReaderPosition(bookId: string) {
   const debugOffsetRef = useRef<number | null>(null);
 
   const debugPosition = useCallback((event: string, details: Record<string, unknown>) => {
-    if (debugCountRef.current >= 50) return;
+    if (debugCountRef.current >= 80) return;
     debugCountRef.current += 1;
+    const scroller = Platform.OS === 'web'
+      ? scrollRef.current?.getScrollableNode() as HTMLElement | undefined : undefined;
     console.info('ATHENA_READER_DEBUG', JSON.stringify({
       event,
       count: paragraphCountRef.current,
@@ -45,22 +48,31 @@ export function useReaderPosition(bookId: string) {
       firstVisible: firstVisibleRef.current,
       scrollOffset: offsetRef.current,
       pendingRatio: pendingScrollRef.current,
+      attempts: jumpAttemptsRef.current,
+      scrollTop: scroller?.scrollTop,
+      scrollHeight: scroller?.scrollHeight,
+      clientHeight: scroller?.clientHeight,
       sampleHeights: [...cellsRef.current.entries()].slice(0, 6).map(([index, cell]) => [index, cell.height]),
       ...details,
     }));
   }, []);
 
   const clearRetry = useCallback(() => {
-    if (retryTimerRef.current !== null) clearTimeout(retryTimerRef.current);
+    if (retryTimerRef.current !== null) {
+      debugPosition('clear-retry', {});
+      clearTimeout(retryTimerRef.current);
+    }
     retryTimerRef.current = null;
-  }, []);
+  }, [debugPosition]);
 
   const cancelSettle = useCallback(() => {
+    debugPosition('cancel-settle', {});
     clearRetry();
     resumeAnchorRef.current = null;
     lastAppliedOffsetRef.current = null;
     jumpAttemptsRef.current = 0;
-  }, [clearRetry]);
+    positioningDeadlineRef.current = 0;
+  }, [clearRetry, debugPosition]);
 
   const cancelParagraphJump = useCallback(() => {
     clearRetry();
@@ -70,6 +82,7 @@ export function useReaderPosition(bookId: string) {
     pendingParagraphChapterRef.current = null;
     lastAppliedOffsetRef.current = null;
     jumpAttemptsRef.current = 0;
+    positioningDeadlineRef.current = 0;
   }, [clearRetry]);
 
   const resetMetrics = useCallback(() => {
@@ -81,6 +94,7 @@ export function useReaderPosition(bookId: string) {
     resumeAnchorRef.current = null;
     lastAppliedOffsetRef.current = null;
     jumpAttemptsRef.current = 0;
+    positioningDeadlineRef.current = 0;
     clearRetry();
   }, [clearRetry]);
 
@@ -165,6 +179,18 @@ export function useReaderPosition(bookId: string) {
       if (isPassage) cancelParagraphJump();
       return;
     }
+    if (positioningDeadlineRef.current === 0) positioningDeadlineRef.current = Date.now() + 30_000;
+    const scheduleRetry = () => {
+      if (retryTimerRef.current !== null || Date.now() >= positioningDeadlineRef.current) return;
+      jumpAttemptsRef.current += 1;
+      if (jumpAttemptsRef.current === 1 || jumpAttemptsRef.current % 5 === 0) {
+        debugPosition('retry', { anchor, estimatedOffset: averageHeightRef.current * (anchor.index + anchor.fraction) });
+      }
+      retryTimerRef.current = setTimeout(() => {
+        retryTimerRef.current = null;
+        position();
+      }, 120);
+    };
     const cell = currentCellLayout(anchor.index);
     if (debugTargetRef.current !== anchor.index ||
       (cell && debugOffsetRef.current !== cell.y)) {
@@ -174,12 +200,21 @@ export function useReaderPosition(bookId: string) {
     }
     if (cell) {
       const offset = Math.max(0, cell.y + anchor.fraction * cell.height - (isPassage ? 16 : 0));
-      if (lastAppliedOffsetRef.current === null || Math.abs(lastAppliedOffsetRef.current - offset) > 1) {
+      const scroller = webScroller();
+      const actualOffset = scroller?.scrollTop ?? offsetRef.current;
+      if (Math.abs(actualOffset - offset) > 1) {
         lastAppliedOffsetRef.current = offset;
         scrollRef.current.scrollToOffset({ offset, animated: false });
       }
       clearRetry();
-      if (isPassage && finishTimerRef.current === null) {
+      const aligned = Math.abs((scroller?.scrollTop ?? offsetRef.current) - offset) <= 1;
+      if (!aligned) {
+        // A target near the measured tail may exist before there is enough
+        // trailing content to put it at the top. Keep applying the same target
+        // when later render windows enlarge the scrollable range.
+        scheduleRetry();
+      }
+      if (isPassage && aligned && finishTimerRef.current === null) {
         ratioRef.current = ratioForAnchor(anchor, paragraphCountRef.current,
           layoutHeightRef.current, averageHeightRef.current);
         finishTimerRef.current = setTimeout(cancelParagraphJump, 800);
@@ -190,20 +225,15 @@ export function useReaderPosition(bookId: string) {
     }
     // Many cells can report layout in one batch; let one retry advance that
     // batch instead of consuming the retry limit for every individual row.
-    if (retryTimerRef.current !== null || jumpAttemptsRef.current >= 60) return;
-    jumpAttemptsRef.current += 1;
+    if (retryTimerRef.current !== null || Date.now() >= positioningDeadlineRef.current) return;
     // The list's cached frame estimates can themselves be stale after text
     // wraps. Our measured average drives the next render window forward.
     scrollRef.current.scrollToOffset({
       offset: Math.max(0, averageHeightRef.current * (anchor.index + anchor.fraction) - (isPassage ? 16 : 0)),
       animated: false,
     });
-    clearRetry();
-    retryTimerRef.current = setTimeout(() => {
-      retryTimerRef.current = null;
-      position();
-    }, 120);
-  }, [cancelParagraphJump, clearRetry, currentCellLayout, debugPosition]);
+    scheduleRetry();
+  }, [cancelParagraphJump, clearRetry, currentCellLayout, debugPosition, webScroller]);
 
   const tryJumpToParagraph = useCallback(() => {
     if (pendingParagraphRef.current !== null &&
@@ -215,11 +245,12 @@ export function useReaderPosition(bookId: string) {
   }, [tryPosition]);
 
   const handleUserScroll = useCallback(() => {
+    debugPosition('user-scroll', {});
     cancelSettle();
     cancelParagraphJump();
     pendingScrollRef.current = null;
     updateObservedRatio();
-  }, [cancelParagraphJump, cancelSettle, updateObservedRatio]);
+  }, [cancelParagraphJump, cancelSettle, debugPosition, updateObservedRatio]);
 
   const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
     offsetRef.current = event.nativeEvent.contentOffset.y;
@@ -281,10 +312,11 @@ export function useReaderPosition(bookId: string) {
   }, []);
 
   useEffect(() => () => {
+    debugPosition('cleanup', {});
     clearRetry();
     if (finishTimerRef.current !== null) clearTimeout(finishTimerRef.current);
     flushProgress();
-  }, [clearRetry, flushProgress]);
+  }, [clearRetry, debugPosition, flushProgress]);
 
   return {
     scrollRef, pendingScrollRef, pendingParagraphRef, pendingParagraphChapterRef,

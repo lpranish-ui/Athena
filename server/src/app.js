@@ -9,6 +9,7 @@ import { generateMcqs as defaultGenerateMcqs, replaceQuestion as defaultReplaceQ
 import { registerGroupRoutes } from './group.js';
 import { HttpError } from './http.js';
 import { IngestError, ingestFile as defaultIngestFile, ingestText as defaultIngestText } from './ingest.js';
+import { summarizeProgress } from './progress.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
 import { registerUploadRoutes } from './uploads.js';
 
@@ -596,8 +597,8 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
         throw new HttpError(400, 'score and total are required.');
       }
       const attempt = await one(
-        `insert into quiz_attempts (set_id, user_id, score, total, answers, mode, duration_seconds)
-         values ($1, $2, $3, $4, $5::jsonb, $6, $7)
+        `insert into quiz_attempts (set_id, user_id, score, total, answers, question_ids, mode, duration_seconds)
+         values ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7, $8)
          returning *`,
         [
           set.id,
@@ -605,6 +606,7 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
           score,
           total,
           JSON.stringify(body.answers ?? null),
+          Array.isArray(body.question_ids) ? JSON.stringify(body.question_ids) : null,
           body.mode === 'exam' ? 'exam' : 'tutor',
           Number.isInteger(body.duration_seconds) ? body.duration_seconds : null,
         ],
@@ -637,6 +639,47 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
       res.json({ count: countRow?.count ?? 0, attempts: rows });
     } catch (error) {
       handle(res, error, 'Could not load your progress.');
+    }
+  });
+
+  /** Progress dashboard: totals, accuracy by book/topic and recent attempts. */
+  app.get('/api/progress', async (req, res) => {
+    try {
+      const attempts = await many(
+        `select id, set_id, score, total, answers, question_ids, mode, duration_seconds, completed_at
+           from quiz_attempts
+          where user_id = $1
+          order by completed_at desc
+          limit 200`,
+        [req.user.id],
+      );
+
+      const setIds = [...new Set(attempts.map((attempt) => attempt.set_id))];
+      const sets = setIds.length
+        ? await many(
+            `select s.id, s.title as set_title, b.title as book_title
+               from mcq_sets s
+               left join chapters c on c.id = s.chapter_id
+               left join books b on b.id = c.book_id
+              where s.id = any($1)`,
+            [setIds],
+          )
+        : [];
+
+      const questionIds = [
+        ...new Set(
+          attempts.flatMap((attempt) =>
+            Array.isArray(attempt.question_ids) ? attempt.question_ids : [],
+          ),
+        ),
+      ];
+      const questions = questionIds.length
+        ? await many('select id, topic, correct_index from mcqs where id = any($1)', [questionIds])
+        : [];
+
+      res.json(summarizeProgress({ attempts, sets, questions }));
+    } catch (error) {
+      handle(res, error, 'Could not load the progress dashboard.');
     }
   });
 

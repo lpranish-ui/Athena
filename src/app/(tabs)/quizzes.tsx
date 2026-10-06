@@ -146,6 +146,19 @@ export default function QuizzesScreen() {
             </Pressable>
             <Pressable
               style={({ pressed }) => [styles.reviewCard, pressed && styles.pressed]}
+              onPress={() => router.push('/progress')}
+            >
+              <Ionicons name="stats-chart-outline" size={20} color={colors.accent} />
+              <View style={styles.reviewText}>
+                <Text style={styles.reviewTitle}>Progress & weak areas</Text>
+                <Text style={styles.reviewMeta}>
+                  Accuracy by topic and book — see where to focus next
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.reviewCard, pressed && styles.pressed]}
               onPress={() => router.push('/group')}
             >
               <Ionicons name="people-outline" size={20} color={colors.accent} />

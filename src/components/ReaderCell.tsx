@@ -1,6 +1,6 @@
 import type { CellRendererProps } from '@react-native/virtualized-lists';
 import { createContext, useContext } from 'react';
-import { View, type LayoutRectangle } from 'react-native';
+import { Platform, View, type LayoutRectangle } from 'react-native';
 
 export const ReaderCellLayoutContext = createContext<(index: number, layout: LayoutRectangle) => void>(
   () => {},
@@ -12,7 +12,8 @@ export function ReaderCell({ index, style, onLayout, onFocusCapture, children }:
   return (
     <View
       style={style}
-      {...{ onFocusCapture, dataSet: { readerIndex: String(index) } }}
+      {...{ onFocusCapture }}
+      {...(Platform.OS === 'web' ? { dataSet: { readerIndex: String(index) } } : {})}
       onLayout={(event) => {
         onLayout?.(event);
         recordLayout(index, event.nativeEvent.layout);

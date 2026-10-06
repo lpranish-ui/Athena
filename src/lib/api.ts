@@ -332,6 +332,38 @@ export async function deleteCard(cardId: string): Promise<void> {
   await api.del(`/api/flashcards/${cardId}`);
 }
 
+// ── progress dashboard ──────────────────────────────────────────────────────
+
+/** Totals, per-book and per-topic accuracy plus recent attempts. */
+export interface ProgressSummary {
+  totals: { attempts: number; answered: number; correct: number; seconds: number; accuracy: number };
+  books: {
+    book_title: string;
+    attempts: number;
+    answered: number;
+    correct: number;
+    accuracy: number;
+  }[];
+  topics: { topic: string; answered: number; correct: number; accuracy: number }[];
+  recent: {
+    set_title: string | null;
+    book_title: string | null;
+    score: number;
+    total: number;
+    mode: string;
+    completed_at: string | null;
+  }[];
+}
+
+/** Loads the progress dashboard (null when unavailable — never blocks a screen). */
+export async function getProgress(): Promise<ProgressSummary | null> {
+  try {
+    return await api.get<ProgressSummary>('/api/progress');
+  } catch {
+    return null;
+  }
+}
+
 /** Deletes the signed-in user's account and all of their data. */
 export async function deleteAccount(): Promise<void> {
   try {
