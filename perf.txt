@@ -1,3 +1,0 @@
-BIG-pressure=2084ms ch=15
-BIG-pericarditis=977ms ch=0
-OXFORD-patient=1813ms ch=23
