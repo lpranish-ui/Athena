@@ -171,8 +171,19 @@ compose.yaml             Local PostgreSQL
 The configured hosted API is `athena-api` on Render, built from `server/Dockerfile`
 (Node 22 plus Poppler). Set server-side `DATABASE_URL`, `JWT_SECRET` and optional
 DeepSeek settings in the hosting environment; the API defaults to port 8787 unless
-`PORT` is set. A web export uses `npx expo export --platform web`, publishes `dist`
-and needs a SPA rewrite to `/index.html` plus `EXPO_PUBLIC_API_URL`.
+`PORT` is set.
+
+The live web app is [athena-study.onrender.com](https://athena-study.onrender.com),
+hosted by the Render static site **athena-study** from the `main` branch. Its
+build command is `npm ci && npx expo export --platform web --clear`, and its
+publish directory is `dist`. Configure `NODE_VERSION=22` and
+`EXPO_PUBLIC_API_URL=https://athena-api-w018.onrender.com` on the static site.
+The saved rewrite is `/*` to `/index.html` with action **Rewrite**, so direct
+links and page reloads work. Clear Metro's export cache when changing the API
+URL to avoid reusing a bundle with a previous environment value.
+
+The API uses a free Render instance, which can sleep after inactivity and delay
+the first request while it starts.
 
 GitHub Actions publishes the development APK to the rolling
 [apk-latest release](https://github.com/lpranish-ui/Athena/releases/tag/apk-latest).
