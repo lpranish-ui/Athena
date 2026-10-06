@@ -1266,6 +1266,22 @@ try {
   console.error('Schema bootstrap failed:', error instanceof Error ? error.message : error);
 }
 
+// In-book search needs the pg_trgm index so ILIKE '%term%' scales to big
+// books. Created here (not in schema.sql) so any failure is visible in logs.
+try {
+  await query('create extension if not exists pg_trgm');
+  await query(
+    'create index if not exists chapters_content_trgm_idx on chapters using gin (content gin_trgm_ops)',
+  );
+  console.log('Search index is ready.');
+  const plan = await query(
+    "explain select id from chapters where content ilike '%pressure%' limit 30",
+  );
+  console.log('Search plan:', plan.rows.map((row) => row['QUERY PLAN']).join(' | '));
+} catch (error) {
+  console.error('Search index failed:', error instanceof Error ? error.message : error);
+}
+
 // Uploads interrupted by a deploy or a crash can never finish processing —
 // mark the stale ones as failed so they show an error instead of spinning
 // forever.
@@ -1273,7 +1289,7 @@ try {
   await query(
     `update books
         set status = 'error', status_message = 'The upload was interrupted. Please try again.'
-      where status = 'processing' and status_message in ('Uploading…', 'Processing…')
+      where status = 'processing'
         and created_at < now() - interval '1 hour'`,
   );
 } catch (error) {
