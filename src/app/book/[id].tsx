@@ -15,11 +15,11 @@ import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
 import { api } from '@/lib/apiClient';
 import {
-  deleteOfflineBook,
-  downloadBook,
-  formatBytes,
-  getOfflineMeta,
-  type OfflineBookMeta,
+    deleteOfflineBook,
+    downloadBook,
+    formatBytes,
+    getOfflineMeta,
+    type OfflineBookMeta,
 } from '@/lib/offline';
 import { colors, fontSize, getSubjectColor, radius, spacing, withAlpha } from '@/theme';
 import type { Book, ChapterSummary } from '@/types';

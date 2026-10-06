@@ -4,8 +4,8 @@
 // entry well under platform size limits.
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { api } from './apiClient';
 import type { Book, ChapterSummary } from '@/types';
+import { api } from './apiClient';
 
 const PREFIX = 'athena.offline.';
 

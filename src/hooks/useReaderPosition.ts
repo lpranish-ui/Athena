@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { Platform } from 'react-native';
 import type {
-  FlatList, LayoutChangeEvent, LayoutRectangle, NativeScrollEvent, NativeSyntheticEvent, ViewToken,
+    FlatList, LayoutChangeEvent, LayoutRectangle, NativeScrollEvent, NativeSyntheticEvent, ViewToken,
 } from 'react-native';
+import { Platform } from 'react-native';
 
 import { saveReadingProgress } from '@/lib/api';
 import {
-  anchorForRatio, anchorForVisibleCells, isScrollTargetAligned,
-  ratioAfterScroll, ratioForAnchor, type ParagraphAnchor,
+    anchorForRatio, anchorForVisibleCells, isScrollTargetAligned,
+    ratioAfterScroll, ratioForAnchor, type ParagraphAnchor,
 } from './readerPosition';
 
 /** Positions are based on the complete chapter, independent of the native render window. */

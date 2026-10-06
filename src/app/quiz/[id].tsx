@@ -17,8 +17,8 @@ import { api } from '@/lib/apiClient';
 import { isClozeCorrect } from '@/lib/cloze';
 import { percentage } from '@/lib/format';
 import { scheduleReview } from '@/lib/review';
-import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import { shareContent } from '@/lib/share';
+import { colors, fontSize, radius, spacing, withAlpha } from '@/theme';
 import type { FlagReason, Mcq, McqSetWithContext, QuizMode } from '@/types';
 
 const LETTERS = 'ABCDEFGH';

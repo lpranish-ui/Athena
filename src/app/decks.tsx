@@ -10,10 +10,10 @@ import { Screen } from '@/components/Screen';
 import { EmptyState, LoadingView } from '@/components/ui';
 import { getDecks, type FlashcardDeck } from '@/lib/api';
 import {
-  getReminderEnabled,
-  remindersSupported,
-  scheduleDailyReviewReminder,
-  setReminderEnabled,
+    getReminderEnabled,
+    remindersSupported,
+    scheduleDailyReviewReminder,
+    setReminderEnabled,
 } from '@/lib/reminders';
 import { colors, withAlpha } from '@/theme';
 

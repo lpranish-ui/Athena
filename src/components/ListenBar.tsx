@@ -1,9 +1,9 @@
 // Listen mode — reads the current chapter aloud with expo-speech.
 // Follows along in the list via onActiveIndex, advances chapters via onChapterEnd.
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Speech from 'expo-speech';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 const RATES = [0.75, 1, 1.25, 1.5, 2] as const;
 

@@ -1,8 +1,8 @@
 // Local review reminders — a daily 8pm nudge scheduled on the device
 // (expo-notifications). Native only; web hides the toggle.
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { Platform } from 'react-native';
 import * as Notifications from 'expo-notifications';
+import { Platform } from 'react-native';
 
 const PREF_KEY = 'athena.reminders.reviews';
 const CHANNEL_ID = 'reviews';

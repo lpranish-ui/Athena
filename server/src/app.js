@@ -3,7 +3,6 @@ import express from 'express';
 import { createAiLimiter } from './ai-limit.js';
 import { answerQuestion as defaultAnswerQuestion } from './ask.js';
 import { registerAuthRoutes, requireAuth } from './auth.js';
-import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { createChapterService } from './chapters.js';
 import * as defaultDatabase from './db.js';
 import { generateMcqs as defaultGenerateMcqs, replaceQuestion as defaultReplaceQuestion } from './generate.js';
@@ -11,6 +10,7 @@ import { registerGroupRoutes } from './group.js';
 import { HttpError } from './http.js';
 import { IngestError, ingestFile as defaultIngestFile, ingestText as defaultIngestText } from './ingest.js';
 import { summarizeProgress } from './progress.js';
+import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
 import { registerUploadRoutes } from './uploads.js';
 
