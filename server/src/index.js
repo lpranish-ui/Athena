@@ -1273,9 +1273,12 @@ try {
   await query(
     'create index if not exists chapters_content_trgm_idx on chapters using gin (content gin_trgm_ops)',
   );
+  // Without fresh stats the planner thinks chapters is tiny and skips the
+  // index — analyze right after (cheap; a handful of rows).
+  await query('analyze chapters');
   console.log('Search index is ready.');
   const plan = await query(
-    "explain select id from chapters where content ilike '%pressure%' limit 30",
+    "explain select id from chapters where content ilike '%pericarditis%' limit 30",
   );
   console.log('Search plan:', plan.rows.map((row) => row['QUERY PLAN']).join(' | '));
 } catch (error) {

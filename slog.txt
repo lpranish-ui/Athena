@@ -1,0 +1,2 @@
+Search index is ready.
+Search plan: Limit  (cost=0.00..9.64 rows=1 width=16) |   ->  Seq Scan on chapters  (cost=0.00..9.64 rows=1 width=16) |         Filter: (content ~~* '%pressure%'::text)
