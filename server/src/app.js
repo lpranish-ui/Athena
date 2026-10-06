@@ -1315,6 +1315,22 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
 
   // Body-parser errors (e.g. files above the 80 MB limit) become friendly JSON.
   app.use(async (error, req, res, _next) => {
+    // Client disconnects (deploy swaps, dropped networks) are not server
+    // errors — the socket is gone, so there is nothing to respond to.
+    if (
+      error?.message === 'request aborted' ||
+      error?.code === 'ECONNRESET' ||
+      error?.type === 'request.aborted'
+    ) {
+      if (!res.headersSent) {
+        try {
+          res.end();
+        } catch {
+          // The connection was already torn down.
+        }
+      }
+      return;
+    }
     if (error?.type === 'entity.too.large') {
       res.status(413).json({
         error:

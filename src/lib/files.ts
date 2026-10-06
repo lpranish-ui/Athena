@@ -60,6 +60,12 @@ export async function pickBookFile(): Promise<PickedBookFile | null> {
 }
 
 const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB per request
+// A backend deploy swaps instances in ~10-20 s and drops in-flight requests.
+// The chunk endpoint is idempotent by byte offset, so patient retries let an
+// upload ride straight through a deploy instead of dying on it.
+const CHUNK_ATTEMPTS = 5;
+const FINISH_ATTEMPTS = 3;
+const retryDelayMs = (attempt: number) => Math.min(1500 * 2 ** attempt, 8000);
 
 export interface UploadProgress {
   phase: 'uploading' | 'processing';
@@ -162,7 +168,7 @@ export async function uploadBookFile(
         chunk.byteOffset + chunk.byteLength,
       ) as ArrayBuffer;
       let accepted = false;
-      for (let attempt = 0; attempt < 3 && !accepted; attempt++) {
+      for (let attempt = 0; attempt < CHUNK_ATTEMPTS && !accepted; attempt++) {
         try {
           const result = await apiRequest<{ received: number }>('PUT', `/api/uploads/${bookId}/chunk`, {
             raw: body,
@@ -172,17 +178,17 @@ export async function uploadBookFile(
           if (result.received !== end) throw new Error('The server received an unexpected amount of data. Retry the upload.');
           accepted = true;
         } catch (error) {
-          if (!(error instanceof ApiError) || ![0, 409, 502, 503, 504].includes(error.status)) throw error;
+          if (!(error instanceof ApiError) || ![0, 409, 500, 502, 503, 504].includes(error.status)) throw error;
           // A lost response may mean the chunk was already committed. Ask before retrying.
           const state = await api.get<{ received: number }>(`/api/uploads/${bookId}`).catch(() => null);
           if (state?.received === end) {
             accepted = true;
           } else if (state && state.received !== sent) {
             throw new Error('The server upload position changed. Pick the file again and retry.');
-          } else if (attempt === 2) {
+          } else if (attempt === CHUNK_ATTEMPTS - 1) {
             throw error;
           } else {
-            await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
           }
         }
       }
@@ -190,12 +196,25 @@ export async function uploadBookFile(
       options.onProgress?.({ phase: 'uploading', sentBytes: sent, totalBytes });
     }
 
-    try {
-      await api.post(`/api/uploads/${bookId}/finish`, { size: sent });
-    } catch (error) {
-      const book = await api.get<{ status: string; status_message: string | null }>(`/api/books/${bookId}`).catch(() => null);
-      if (!book || book.status === 'error' || book.status_message === 'Uploading…') throw error;
+    let finishError: unknown = null;
+    for (let attempt = 0; attempt < FINISH_ATTEMPTS; attempt++) {
+      try {
+        await api.post(`/api/uploads/${bookId}/finish`, { size: sent });
+        finishError = null;
+        break;
+      } catch (error) {
+        finishError = error;
+        // A lost response may still have started processing — check the book.
+        const book = await api.get<{ status: string; status_message: string | null }>(`/api/books/${bookId}`).catch(() => null);
+        if (book && book.status !== 'error' && book.status_message !== 'Uploading…') {
+          finishError = null;
+          break;
+        }
+        if (book?.status === 'error') break;
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+      }
     }
+    if (finishError instanceof Error) throw finishError;
     options.onProgress?.({ phase: 'processing', sentBytes: sent, totalBytes });
     return { bookId };
   } catch (error) {
