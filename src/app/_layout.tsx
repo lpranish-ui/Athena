@@ -103,6 +103,7 @@ function RootNavigator() {
       <Stack.Screen name="study/report" options={{ ...headerOptions, title: 'Report content' }} />
       <Stack.Screen name="account/security" options={{ ...headerOptions, title: 'Account security' }} />
       <Stack.Screen name="help" options={{ ...headerOptions, title: 'Help & feedback' }} />
+      <Stack.Screen name="admin/reports" options={{ ...headerOptions, title: 'Content reports' }} />
       <Stack.Screen name="study/mistakes" options={{ ...headerOptions, title: 'Mistake journal' }} />
       <Stack.Screen name="study/session/[id]" options={{ ...headerOptions, title: 'Daily session' }} />
       </Stack.Protected>
