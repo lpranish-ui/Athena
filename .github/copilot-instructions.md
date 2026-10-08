@@ -19,13 +19,24 @@ Render and Postgres. No Supabase anymore — that architecture was fully replace
   (`npm install && npx expo export --platform web`, publish `dist`, rewrite
   `/* → /index.html`, env `EXPO_PUBLIC_API_URL`).
 - **APK**: GitHub Actions (`build-apk.yml`, free, no Expo account) — pushes to
-  `src/**`/config rebuild it; rolling release `apk-latest`:
+  `src/**`/`server/**`/config rebuild it (~13–18 min); rolling release `apk-latest`:
   `https://github.com/lpranish-ui/Athena/releases/download/apk-latest/app-release.apk`.
-  Cold builds on GitHub runners take 25–40 min; consider gradle caching later.
 - **AI**: DeepSeek via `server/src/ai.js` — thinking mode stays ON for verbatim
   quotes; generation budgets are large (24k) so reasoning can't starve the
   answer; 3 attempts + timeouts + salvage logic in `chatJson`; every call logs
-  `ai call ok/empty/failed` (visible in Render logs).
+  `ai call ok/empty/failed` (visible in Render logs). Quiz/study-kit generation
+  runs through a durable Postgres queue (`server/src/jobs.js`, `generation_jobs`
+  table + in-process worker started in `server/src/index.js`); the client polls
+  `/api/ai/jobs`. AI budgets (`server/src/ai-limit.js`) are persistent and
+  shared, counted from the `ai_calls` log over a sliding hour: 200 calls/user +
+  400 global by default (`AI_REQUESTS_PER_HOUR`, `AI_GLOBAL_REQUESTS_PER_HOUR`).
+  Aggregate library storage quotas live in `server/src/ingest.js`
+  (`LIBRARY_CHARS_PER_USER` 96M chars, `LIBRARY_CHARS_TOTAL` 400M;
+  `books.total_chars`, backfilled at boot).
+- **Operator/email (optional env)**: the `/admin/reports` triage screen activates
+  for emails in `ADMIN_EMAILS` (404 when unset); password reset/verification
+  emails need `RESEND_API_KEY` + `AUTH_EMAIL_FROM` + `AUTH_PUBLIC_URL` (unset →
+  explicit "unavailable" message, never a silent failure).
 
 ## Key flows
 
@@ -43,6 +54,11 @@ Render and Postgres. No Supabase anymore — that architecture was fully replace
 - **Quiz generation**: `server/src/generate.js` — quote validation (`locateQuote`
   tolerant of PDF spacing), near-dup filter, blind verify, retry-once on a
   zero-valid draft. Client chunks large sets via `addToSetId`.
+- **Durable generation**: `POST /api/ai/jobs` (202, cap 3 active/user) enqueues;
+  the worker leases one job at a time (heartbeat, retry transient once, reclaim
+  expired leases, 7-day retention) and streams stage text. Client `waitForJob`
+  in `src/lib/api.ts` polls; the Quizzes tab lists active jobs. Inline
+  `/api/ai/*` endpoints remain for older APKs.
 
 ## Commands on this machine
 
@@ -65,6 +81,7 @@ Render and Postgres. No Supabase anymore — that architecture was fully replace
 
 ## Roadmap
 
+- Always-on API/worker hosting (the free tier sleeps and pauses inline workers)
+  and reviewed course packs (requires a qualified medical editor).
 - OCR for scanned PDFs (prototype in `worker/`; needs more CPU/RAM hosting).
-- Reader highlights/notes; admin flag dashboard; offline mode; a licensed
-  starter library.
+- A licensed starter library.
