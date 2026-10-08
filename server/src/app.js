@@ -16,6 +16,7 @@ import { registerStudyRoutes } from './study.js';
 import { registerUploadRoutes } from './uploads.js';
 import { registerGenerationRoutes } from './jobs.js';
 import { requestMonitoring } from './observability.js';
+import { registerAdminRoutes } from './admin.js';
 
 /** Construct routes without connecting to a database or opening a listening socket. */
 export function createApp({ database = defaultDatabase, authenticate = createRequireAuth(database),
@@ -72,6 +73,8 @@ export function createApp({ database = defaultDatabase, authenticate = createReq
   // Registered after the limiter so new jobs count against the hourly budget
   // (status polling is exempted by method inside the limiter).
   registerGenerationRoutes(app, { database });
+  // Operator-only content report triage (off unless ADMIN_EMAILS is set).
+  registerAdminRoutes(app, { database });
 
   /** Sends a thrown error with the right status and a `{ error }` body. */
   function handle(res, error, fallback) {

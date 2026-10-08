@@ -32,6 +32,13 @@ in support logs. Recovery requests intentionally do not reveal account existence
 
 ## Content triage
 
+Operators triage the same queue two ways: `server/scripts/review-reports.js`
+from an operator shell, or the web app's `/admin/reports` screen. The screen is
+allow-listed through `ADMIN_EMAILS` (comma-separated) in the API environment
+and the routes behave as if they do not exist while it is unset. Either way,
+resolve a report only after reviewing the issue and making any required content
+correction. Reporter identity is never shown.
+
 From `server/`, with the intended `DATABASE_URL` already set:
 
 ```bash

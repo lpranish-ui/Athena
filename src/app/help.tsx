@@ -11,10 +11,14 @@ export default function HelpScreen() {
   const [reports, setReports] = useState<Report[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isOperator, setIsOperator] = useState(false);
   const load = useCallback(async () => {
     try { setReports(await api.get<Report[]>('/api/study/reports')); setError(null); }
     catch (err) { setError(err instanceof Error ? err.message : 'Could not load reports.'); }
-    finally { setLoading(false); }
+    // Operator tooling stays invisible unless this account is listed in ADMIN_EMAILS.
+    try { await api.get('/api/admin/reports?status=open'); setIsOperator(true); }
+    catch { setIsOperator(false); }
+    setLoading(false);
   }, []);
   useFocusEffect(useCallback(() => { void load(); }, [load]));
   return <StudyPage>
@@ -36,6 +40,11 @@ export default function HelpScreen() {
       <Text style={studyStyles.muted}>Open a course objective or a graded daily question and choose Report an issue. Current pilot material remains an editorial draft; follow its sources when checking an explanation.</Text>
       <Button label="Open course objectives" variant="secondary" onPress={() => router.push('/study/course')} />
     </Card>
+    {isOperator ? <Card style={studyStyles.card}>
+      <Text style={studyStyles.sectionTitle}>Operator: content report queue</Text>
+      <Text style={studyStyles.muted}>Triage student reports across all accounts and mark them triaged or resolved. Resolve a report only after the content is corrected.</Text>
+      <Button label="Open the reports queue" variant="secondary" onPress={() => router.push('/admin/reports')} />
+    </Card> : null}
     <Text style={studyStyles.sectionTitle}>Your recent reports</Text>
     {loading ? <LoadingView label="Loading reports…" /> : null}
     {error ? <LoadError message={error} onRetry={() => void load()} /> : null}

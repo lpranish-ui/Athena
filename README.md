@@ -265,8 +265,10 @@ surface immediately. A user can have three jobs queued or running at a time.
 
 Course objectives and graded daily questions offer **Report an issue**. Reports
 are versioned and private to the reporter, with open/triaged/resolved status in
-Help & feedback. Operators can triage with `server/scripts/review-reports.js`;
-there is no public administrator route. Publishing checks require reviewer/date
+Help & feedback. Operators triage with `server/scripts/review-reports.js` or
+the `/admin/reports` screen, which only appears for signed-in emails listed in
+`ADMIN_EMAILS`; there is no public administrator route. Publishing checks
+require reviewer/date
 metadata and distribution provenance before a pack can declare itself reviewed.
 These checks cannot replace a qualified medical editor's review.
 
