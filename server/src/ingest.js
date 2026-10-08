@@ -573,11 +573,38 @@ async function insertChapters(bookId, chapters, execute = query) {
   return inserted;
 }
 
-async function finalizeBook(bookId, lines, outline, fileHash = null) {
+/**
+ * Bounds aggregate library storage per account and across all accounts. Books
+ * record their extracted-text size (total_chars) so the sums stay cheap.
+ */
+export async function enforceLibraryQuota({ userId, bookId, incomingChars, execute = query }) {
+  const perUserLimit = Number(process.env.LIBRARY_CHARS_PER_USER) || 96_000_000;
+  const globalLimit = Number(process.env.LIBRARY_CHARS_TOTAL) || 400_000_000;
+  const row = (
+    await execute(
+      `select coalesce(sum(total_chars) filter (where owner_id = $1 and id <> $2), 0)::bigint as user_chars,
+              coalesce(sum(total_chars), 0)::bigint as total_chars
+         from books`,
+      [userId, bookId],
+    )
+  ).rows[0] ?? { user_chars: 0, total_chars: 0 };
+
+  if (Number(row.user_chars) + incomingChars > perUserLimit) {
+    throw new IngestError('Your library is at its storage limit. Remove a book you no longer need, then upload again.');
+  }
+  if (Number(row.total_chars) + incomingChars > globalLimit) {
+    throw new IngestError('Athena’s shared library storage is full right now. Please try again later.');
+  }
+}
+
+async function finalizeBook(bookId, lines, outline, fileHash = null, userId = null) {
   const usable = lines;
   const totalChars = usable.reduce((sum, line) => sum + line.text.length + 1, 0);
   if (totalChars > MAX_EXTRACTED_TEXT_CHARS) {
     throw new IngestError(`This book exceeds the extracted-text limit of ${MAX_EXTRACTED_TEXT_CHARS.toLocaleString('en-US')} characters. Split it into smaller volumes and upload each volume.`);
+  }
+  if (userId) {
+    await enforceLibraryQuota({ userId, bookId, incomingChars: totalChars });
   }
 
   const chapters = splitIntoChapters(usable, outline);
@@ -597,8 +624,8 @@ async function finalizeBook(bookId, lines, outline, fileHash = null) {
     await client.query('delete from chapters where book_id = $1', [bookId]);
     const inserted = await insertChapters(bookId, chapters, client.query.bind(client));
     await client.query(
-      "update books set status = 'ready', status_message = null, file_hash = coalesce($2, file_hash) where id = $1",
-      [bookId, fileHash],
+      `update books set status = 'ready', status_message = null, total_chars = $3, file_hash = coalesce($2, file_hash) where id = $1`,
+      [bookId, fileHash, totalChars],
     );
     return inserted;
   });
@@ -772,7 +799,7 @@ export async function ingestFileFromPath({ userId, bookId, filePath, fileType, o
     }
 
     await onProgress?.('Detecting chapters…');
-    const chapters = await finalizeBook(bookId, lines, outline, fileHash);
+    const chapters = await finalizeBook(bookId, lines, outline, fileHash, userId);
     return { bookId, chapters };
   } catch (error) {
     const message =
@@ -824,7 +851,7 @@ export async function ingestText({ userId, title, subject, author, text }) {
       .map((line) => ({ text: line.trim(), page: null }))
       .filter((line) => line.text.length > 0);
 
-    const chapters = await finalizeBook(book.id, lines, [], fileHash);
+    const chapters = await finalizeBook(book.id, lines, [], fileHash, userId);
     return { bookId: book.id, chapters };
   } catch (error) {
     // The book was created in this call — remove the shell row so the
@@ -891,7 +918,7 @@ export async function ingestFile({ userId, bookId, bytes, fileType }) {
         .filter((line) => line.text.length > 0);
     }
 
-    const chapters = await finalizeBook(bookId, lines, outline, fileHash);
+    const chapters = await finalizeBook(bookId, lines, outline, fileHash, userId);
 
     return { bookId, chapters };
   } catch (error) {

@@ -536,3 +536,8 @@ create table if not exists generation_jobs (
 );
 create index if not exists generation_jobs_user_idx on generation_jobs(user_id, created_at desc);
 create index if not exists generation_jobs_queue_idx on generation_jobs(status, created_at);
+
+-- Aggregate library quotas: each book records its extracted-text size so
+-- per-account and global storage sums stay cheap. Existing rows are backfilled
+-- once at boot (see server/src/index.js).
+alter table books add column if not exists total_chars bigint;

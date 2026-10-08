@@ -85,6 +85,14 @@ survive restarts and cover background job execution. `AI_REQUESTS_PER_HOUR`
 (default 200) bounds one account; `AI_GLOBAL_REQUESTS_PER_HOUR` (default 400)
 bounds all accounts together and is the main backstop against abuse through
 fresh accounts. `AI_CONCURRENT_PER_USER` (default 2) limits in-flight work per
-account. A budget read that fails lets the request through deliberately. An
-always-running API/worker and aggregate library quotas remain subsequent
+account. A budget read that fails lets the request through deliberately.
+
+Aggregate library storage is bounded too: `LIBRARY_CHARS_PER_USER` (default
+96M extracted characters) per account and `LIBRARY_CHARS_TOTAL` (default
+400M) across all accounts, enforced before a book's chapters are written.
+Each book records its extracted-text size (`books.total_chars`), so the sums
+stay cheap; validate the global default against real database growth before
+large acquisition campaigns.
+
+An always-running API/worker remains subsequent
 infrastructure work.

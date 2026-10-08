@@ -19,6 +19,17 @@ try {
   throw error;
 }
 
+// Older books predate total_chars; fill it once so library quota sums are accurate.
+try {
+  const backfill = await query(
+    `update books set total_chars = (select coalesce(sum(length(content)), 0) from chapters where chapters.book_id = books.id)
+      where total_chars is null`,
+  );
+  if (backfill.rowCount) console.log(`Library size backfill: ${backfill.rowCount} book(s).`);
+} catch (error) {
+  console.error('Library size backfill failed:', error instanceof Error ? error.message : error);
+}
+
 // In-book search needs the pg_trgm index so ILIKE '%term%' scales to big
 // books. Created here (not in schema.sql) so any failure is visible in logs.
 try {

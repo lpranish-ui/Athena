@@ -51,7 +51,7 @@ test('short front sections remain readable when later chapters validate the spli
   assert.ok(chapters[0].content.includes('Brief source introduction.'));
 });
 
-function mockIngestDatabase(t) {
+function mockIngestDatabase(t, { library = { user_chars: 0, total_chars: 0 } } = {}) {
   const originalQuery = pool.query;
   const originalConnect = pool.connect;
   t.after(() => { pool.query = originalQuery; pool.connect = originalConnect; });
@@ -60,6 +60,7 @@ function mockIngestDatabase(t) {
   const events = [];
   pool.query = async (sql, params) => {
     if (sql.startsWith('select id, title from books')) return { rows: [] };
+    if (sql.includes('from books') && sql.includes('total_chars')) return { rows: [library] };
     if (sql.includes('insert into books')) {
       book = { id: 'new-book', status: sql.includes("false, 'processing'") ? 'processing' : 'ready', file_hash: params[4] };
       return { rows: [{ id: book.id }] };
@@ -124,6 +125,40 @@ test('a configured extracted-text limit rejects the whole book before chapter wr
   assert.equal(fixture.book, null);
   assert.deepEqual(fixture.chapters, []);
   assert.deepEqual(fixture.events, []);
+});
+
+test('per-account library quotas stop a book before any chapter writes', async (t) => {
+  const previous = process.env.LIBRARY_CHARS_PER_USER;
+  try {
+    process.env.LIBRARY_CHARS_PER_USER = '10';
+    const fixture = mockIngestDatabase(t, { library: { user_chars: 900, total_chars: 0 } });
+    await assert.rejects(
+      ingestText({ userId: 'student', title: 'Over quota', subject: 'General', text: quote.repeat(5) }),
+      /storage limit/,
+    );
+    assert.deepEqual(fixture.chapters, [], 'rejected books write no chapters');
+    assert.equal(fixture.book, null, 'a failed import removes its shell row');
+  } finally {
+    if (previous === undefined) delete process.env.LIBRARY_CHARS_PER_USER;
+    else process.env.LIBRARY_CHARS_PER_USER = previous;
+  }
+});
+
+test('the shared global library quota stops new accounts too', async (t) => {
+  const previous = process.env.LIBRARY_CHARS_TOTAL;
+  try {
+    process.env.LIBRARY_CHARS_TOTAL = '10';
+    const fixture = mockIngestDatabase(t, { library: { user_chars: 0, total_chars: 900 } });
+    await assert.rejects(
+      ingestText({ userId: 'fresh-account', title: 'Shared over quota', subject: 'General', text: quote.repeat(5) }),
+      /shared library storage/,
+    );
+    assert.deepEqual(fixture.chapters, []);
+    assert.equal(fixture.book, null);
+  } finally {
+    if (previous === undefined) delete process.env.LIBRARY_CHARS_TOTAL;
+    else process.env.LIBRARY_CHARS_TOTAL = previous;
+  }
 });
 
 function textPdf(text) {
