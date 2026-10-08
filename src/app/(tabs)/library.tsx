@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import {
     ActivityIndicator,
     FlatList,
@@ -16,12 +16,16 @@ import { BookCard } from '@/components/BookCard';
 import { Screen } from '@/components/Screen';
 import { Button, EmptyState, ErrorBanner, Input } from '@/components/ui';
 import { getReadingList, type ReadingListItem } from '@/lib/api';
-import { api } from '@/lib/apiClient';
+import { api, loadToken } from '@/lib/apiClient';
+import { useAuth } from '@/lib/auth';
+import { assertOfflineAccount, captureOfflineAccount, isOfflineNetworkError, listOfflineBooks } from '@/lib/offline';
 import { colors, spacing, withAlpha } from '@/theme';
 import type { BookWithCounts } from '@/types';
 
 export default function LibraryScreen() {
   const router = useRouter();
+  const { user } = useAuth();
+  const userId = user?.id;
   const [books, setBooks] = useState<BookWithCounts[]>([]);
   const [reading, setReading] = useState<ReadingListItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -29,26 +33,59 @@ export default function LibraryScreen() {
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [subjectFilter, setSubjectFilter] = useState<string | null>(null);
+  const [offline, setOffline] = useState(false);
+  const request = useRef(0);
 
   const load = useCallback(async () => {
+    if (!userId) return;
+    const version = ++request.current;
+    const lease = captureOfflineAccount();
     try {
-      const [data, readingData] = await Promise.all([
-        api.get<BookWithCounts[]>('/api/books'),
+      const token = await loadToken();
+      assertOfflineAccount(lease);
+      const results = await Promise.allSettled([
+        api.get<BookWithCounts[]>('/api/books', token),
         getReadingList(),
       ]);
+      assertOfflineAccount(lease);
+      if (version !== request.current) return;
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+      if (failures.length) throw failures.find((result) => !isOfflineNetworkError(result.reason))?.reason ?? failures[0].reason;
+      const data = (results[0] as PromiseFulfilledResult<BookWithCounts[]>).value;
+      const readingData = (results[1] as PromiseFulfilledResult<ReadingListItem[]>).value;
       setError(null);
+      setOffline(false);
       setBooks(data);
       setReading(readingData);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load the library.');
+      if (version !== request.current) return;
+      if (isOfflineNetworkError(err)) {
+        try {
+          const downloads = await listOfflineBooks(lease);
+          if (version !== request.current) return;
+          setBooks(downloads.map((meta) => ({ ...meta.book, chapter_count: meta.chapters.length })));
+          setReading([]);
+          setOffline(true);
+          setError(downloads.length ? null : 'No books are downloaded for this account. Connect to download a book first.');
+        } catch (storageError) {
+          if (version === request.current) { setBooks([]); setReading([]); setError(storageError instanceof Error ? storageError.message : 'Could not open your downloads.'); }
+        }
+      } else {
+        setBooks([]);
+        setReading([]);
+        setError(err instanceof Error ? err.message : 'Could not load the library.');
+      }
     }
-    setLoading(false);
-    setRefreshing(false);
-  }, []);
+    if (version === request.current) { setLoading(false); setRefreshing(false); }
+  }, [userId]);
 
   useFocusEffect(
     useCallback(() => {
+      setBooks([]);
+      setReading([]);
+      setLoading(true);
       void load();
+      return () => { request.current += 1; };
     }, [load]),
   );
 
@@ -90,7 +127,7 @@ export default function LibraryScreen() {
               <View style={styles.titleText}>
                 <Text style={styles.title}>Library</Text>
                 <Text style={styles.subtitle}>
-                  {books.length} {books.length === 1 ? 'book' : 'books'} · your uploads are private
+                  {books.length} {books.length === 1 ? 'book' : 'books'} · {offline ? 'downloaded for this account' : 'your uploads are private'}
                 </Text>
               </View>
               <View style={styles.titleActions}>
@@ -111,6 +148,7 @@ export default function LibraryScreen() {
                 <Button label="Add book" icon="add" small onPress={() => router.push('/upload')} />
               </View>
             </View>
+            {offline ? <Text style={styles.subtitle}>Offline reading · tap a downloaded book to open it. Reconnect to manage your library.</Text> : null}
             {reading.length > 0 ? (
               <View style={styles.shelf}>
                 <Text style={styles.shelfTitle}>Continue reading</Text>
@@ -208,7 +246,7 @@ export default function LibraryScreen() {
             <BookCard
               book={item}
               onPress={() =>
-                router.push({ pathname: '/book/[id]', params: { id: item.id } })
+                offline ? router.push({ pathname: '/reader/[bookId]', params: { bookId: item.id } }) : router.push({ pathname: '/book/[id]', params: { id: item.id } })
               }
             />
           </View>

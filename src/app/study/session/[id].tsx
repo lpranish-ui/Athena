@@ -1,15 +1,16 @@
 import { Ionicons } from '@expo/vector-icons';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import { AppState, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import { LoadError } from '@/components/LoadError';
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
 import { ProgressBar, ReviewNote, SourceLinks, Stat, studyError, studyStyles } from '@/components/study/StudyUI';
-import { completeStudyStep, getStudySession } from '@/lib/study';
+import { completeStudyStep, discardPendingStudyProgress, getDownloadedStudySession, getStudySession } from '@/lib/study';
+import type { OfflineStudySession } from '@/lib/offlineStudy';
 import { colors, withAlpha } from '@/theme';
-import type { StudyMistake, StudySession } from '@/types/study';
+import type { StudyMistake } from '@/types/study';
 
 type Confidence = StudyMistake['confidence'];
 const CONFIDENCE_CHOICES: { value: Confidence; label: string }[] = [
@@ -22,7 +23,7 @@ const STEP_LABELS = { new: 'BUILD UNDERSTANDING', review: 'RETRIEVE FROM MEMORY'
 export default function StudySessionScreen() {
   const router = useRouter();
   const { id } = useLocalSearchParams<{ id: string }>();
-  const [session, setSession] = useState<StudySession | null>(null);
+  const [session, setSession] = useState<OfflineStudySession | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloading, setReloading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,8 +32,11 @@ export default function StudySessionScreen() {
   const [confidence, setConfidence] = useState<Confidence | null>(null);
   const [saving, setSaving] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [conflict, setConflict] = useState(false);
   const request = useRef(0);
   const saveInFlight = useRef(false);
+  const syncInFlight = useRef(false);
   const scroll = useRef<ScrollView>(null);
 
   const moveTo = (index: number) => {
@@ -53,7 +57,19 @@ export default function StudySessionScreen() {
       setSelected(null);
       setConfidence(null);
       setError(null);
-    }).catch((err: unknown) => {
+      setConflict(false);
+    }).catch(async (err: unknown) => {
+      if (version !== request.current) return;
+      if (err instanceof Error && 'status' in err && err.status === 409 && id) {
+        try {
+          const local = await getDownloadedStudySession(id);
+          if (version !== request.current) return;
+          if (local) { setSession(local); setViewIndex(local.current_index); setConflict(true); }
+        } catch (storageError) {
+          if (version === request.current) setError(studyError(storageError, 'Could not open locally saved choices.'));
+          return;
+        }
+      }
       if (version === request.current) setError(studyError(err, 'Could not load this study session.'));
     }).finally(() => {
       if (version === request.current) {
@@ -73,31 +89,71 @@ export default function StudySessionScreen() {
     return () => { request.current += 1; };
   }, [load]);
 
+  const sync = useCallback(async () => {
+    if (!id || syncInFlight.current || saveInFlight.current) return;
+    const version = request.current;
+    syncInFlight.current = true;
+    setSyncing(true);
+    try {
+      const value = await getStudySession(id);
+      if (version !== request.current) return;
+      setSession(value);
+      setError(null);
+      setConflict(false);
+    } catch (err) {
+      if (version !== request.current) return;
+      setError(studyError(err, 'Your locally saved answers are waiting to sync.'));
+      setConflict(err instanceof Error && 'status' in err && err.status === 409);
+    } finally {
+      syncInFlight.current = false;
+      if (version === request.current) setSyncing(false);
+    }
+  }, [id]);
+
+  const pendingCount = session?.offline?.pending_steps.length ?? 0;
+  useEffect(() => {
+    if (!pendingCount) return;
+    const interval = setInterval(() => { void sync(); }, 30000);
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void sync(); });
+    const retry = () => { void sync(); };
+    if (Platform.OS === 'web') globalThis.addEventListener?.('online', retry);
+    return () => {
+      clearInterval(interval);
+      subscription.remove();
+      if (Platform.OS === 'web') globalThis.removeEventListener?.('online', retry);
+    };
+  }, [pendingCount, sync]);
+
   const step = session?.steps[viewIndex];
   const feedback = step?.feedback;
-  const answered = !!step?.completed;
+  const pending = !!step && !!session?.offline?.pending_steps.includes(step.id);
+  const answered = !!step?.completed || pending;
   const chosenOption = answered ? step?.answer?.option_index ?? selected : selected;
   const savedConfidence = step?.answer?.confidence;
 
   const saveStep = async () => {
-    if (!session || !step || saveInFlight.current || step.completed) return;
+    if (!session || !step || saveInFlight.current || syncInFlight.current || answered) return;
     if (step.type === 'question' && (selected === null || confidence === null)) return;
     saveInFlight.current = true;
     setSaving(true);
     setError(null);
+    const version = request.current;
     try {
       const response = await completeStudyStep(session.id, step.id, step.type === 'question'
         ? { option_index: selected!, confidence: confidence! }
         : {});
-      setSession(response.session);
+      if (version !== request.current) return;
+      setSession(response.session as OfflineStudySession);
       // The API advances immediately. Keep the answered question visible until Continue,
       // so the learner can read the saved explanation before moving on.
       if (step.type === 'lesson') moveTo(response.session.current_index);
     } catch (err) {
+      if (version !== request.current) return;
+      setConflict(err instanceof Error && 'status' in err && err.status === 409);
       setError(`${studyError(err, 'Could not save this step.')} Your progress will update only after it is saved. Retry below or reload the saved session.`);
     } finally {
       saveInFlight.current = false;
-      setSaving(false);
+      if (version === request.current) setSaving(false);
     }
   };
 
@@ -117,8 +173,10 @@ export default function StudySessionScreen() {
   );
 
   const complete = session?.status === 'completed' && viewIndex >= session.steps.length;
+  const waitingForSync = !!session && viewIndex >= session.steps.length && pendingCount > 0;
   const completedSteps = session?.steps.filter((item) => item.completed).length || 0;
-  const answeredSteps = session?.steps.map((item, index) => ({ ...item, index })).filter((item) => item.type === 'question' && item.completed && item.feedback) || [];
+  const savedSteps = completedSteps + pendingCount;
+  const answeredSteps = session?.steps.map((item, index) => ({ ...item, index })).filter((item) => item.type === 'question' && (item.completed && item.feedback || session.offline?.pending_steps.includes(item.id))) || [];
 
   return (
     <Screen padded={false} edges={['left', 'right']}>
@@ -126,7 +184,7 @@ export default function StudySessionScreen() {
       <ScrollView ref={scroll} keyboardShouldPersistTaps="handled" contentContainerStyle={studyStyles.page}>
         <View style={{ gap: 4 }}>
           {leaveControl}
-          {session && !complete ? <Text style={studyStyles.caption}>Completed steps are saved. Submit an answer before leaving to save it.</Text> : null}
+          {session && !complete ? <Text style={studyStyles.caption}>Submit each answer to save it. Keep this session open or reopen it when you reconnect to sync local work.</Text> : null}
         </View>
         {!session && error ? <LoadError message={error} onRetry={() => { setLoading(true); void load(); }} /> : null}
         {session ? (
@@ -135,10 +193,27 @@ export default function StudySessionScreen() {
               <Text style={studyStyles.eyebrow}>{session.course_title.toUpperCase()}</Text>
               <View style={studyStyles.spread}>
                 <Text style={studyStyles.caption}>{session.local_date} · {session.estimated_minutes} minute plan</Text>
-                <Text style={studyStyles.caption}>{completedSteps}/{session.steps.length} saved</Text>
+                <Text style={studyStyles.caption}>{savedSteps}/{session.steps.length} saved{pendingCount ? ` · ${pendingCount} pending sync` : ''}</Text>
               </View>
-              <ProgressBar value={session.steps.length ? completedSteps / session.steps.length * 100 : 0} label={`${completedSteps} of ${session.steps.length} steps saved`} />
+              <ProgressBar value={session.steps.length ? savedSteps / session.steps.length * 100 : 0} label={`${savedSteps} of ${session.steps.length} steps saved, ${pendingCount} pending sync`} />
             </View>
+
+            {session.offline?.cached || pendingCount ? (
+              <Card style={studyStyles.card}>
+                <Badge label={pendingCount ? 'SAVED ON THIS DEVICE' : 'DOWNLOADED SESSION'} color={colors.warning} />
+                <Text style={studyStyles.muted}>{pendingCount ? `${pendingCount} step${pendingCount === 1 ? '' : 's'} await server sync. Answers and confidence are stored locally; grading and learning progress update after sync.` : 'You are reading a downloaded session. Reconnect to refresh your account progress.'}</Text>
+                <Text style={studyStyles.caption}>Keep this account signed in until sync completes. Signing out removes private downloads and unsynced work.</Text>
+                <Button label="Sync now" icon="sync-outline" variant="secondary" loading={syncing} disabled={saving || reloading} onPress={() => void sync()} />
+              </Card>
+            ) : null}
+
+            {waitingForSync ? (
+              <Card style={studyStyles.card}>
+                <Text style={studyStyles.heading}>Your practice is saved locally.</Text>
+                <Text style={studyStyles.muted}>You reached the end of this downloaded plan. Connect to receive explanations, grading, and your session recap.</Text>
+                <Button label="Back to Today" onPress={() => router.replace('/today')} />
+              </Card>
+            ) : null}
 
             {complete ? (
               <>
@@ -156,7 +231,7 @@ export default function StudySessionScreen() {
                   <Button label="Review mistake journal" variant="secondary" icon="bookmarks-outline" onPress={() => router.push('/study/mistakes')} />
                 </Card>
               </>
-            ) : step ? (
+            ) : waitingForSync ? null : step ? (
               <>
                 <View style={{ gap: 10 }}>
                   <Text style={studyStyles.caption}>STEP {viewIndex + 1} OF {session.steps.length} · {step.estimated_minutes} MIN</Text>
@@ -195,10 +270,10 @@ export default function StudySessionScreen() {
                           <Pressable
                             key={`${step.id}-${index}`}
                             accessibilityRole="radio"
-                            accessibilityState={{ checked: chosen, disabled: answered || saving }}
+                            accessibilityState={{ checked: chosen, disabled: answered || saving || syncing }}
                             aria-checked={chosen}
                             accessibilityLabel={`${chosen ? 'Your answer. ' : ''}${String.fromCharCode(65 + index)}. ${option}${correct ? '. Correct answer' : wrong ? '. Incorrect answer' : ''}`}
-                            disabled={answered || saving}
+                            disabled={answered || saving || syncing}
                             onPress={() => { setSelected(index); setError(null); }}
                             style={({ pressed }) => [styles.option, chosen && styles.optionSelected, correct && styles.optionCorrect, wrong && styles.optionWrong, pressed && { opacity: 0.8 }]}
                           >
@@ -221,7 +296,7 @@ export default function StudySessionScreen() {
                               accessibilityRole="radio"
                               accessibilityState={{ checked: confidence === choice.value, disabled: saving }}
                               aria-checked={confidence === choice.value}
-                              disabled={saving}
+                              disabled={saving || syncing}
                               onPress={() => setConfidence(choice.value)}
                               style={[styles.confidence, confidence === choice.value && styles.confidenceSelected]}
                             >
@@ -248,8 +323,10 @@ export default function StudySessionScreen() {
                         ) : null}
                         <SourceLinks sources={feedback.sources} />
                         <Text style={[studyStyles.caption, { color: colors.primary }]}>Answer saved{feedback.correct ? '.' : ' to your mistake journal for later practice.'}</Text>
+                        <Button label="Report this question" variant="ghost" small icon="flag-outline" onPress={() => router.push({ pathname: '/study/report', params: { courseId: session.course_id, conceptId: step.concept_id, questionId: step.question?.id, sessionId: session.id } })} />
                       </Card>
                     ) : null}
+                    {pending && !feedback ? <Card style={studyStyles.card}><Text style={studyStyles.label}>Answer and confidence saved locally</Text><Text style={studyStyles.muted}>Continue with the downloaded plan. Your explanation will be available after the server grades this answer.</Text><Text style={studyStyles.caption}>Your confidence: {CONFIDENCE_CHOICES.find((choice) => choice.value === savedConfidence)?.label}</Text></Card> : null}
                   </>
                 ) : <ErrorBanner message="This question is missing its content. Reload the session to try again." />}
 
@@ -260,10 +337,10 @@ export default function StudySessionScreen() {
                   </View>
                 ) : null}
                 <Button
-                  label={answered ? (session.status === 'completed' ? 'See session recap' : 'Continue') : step.type === 'lesson' ? 'I’ve read this · Continue' : 'Check answer'}
+                  label={answered ? (session.status === 'completed' ? 'See session recap' : 'Continue') : step.type === 'lesson' ? 'I’ve read this · Continue' : session.offline?.cached ? 'Save answer' : 'Check answer'}
                   icon={answered || step.type === 'lesson' ? 'arrow-forward' : 'checkmark-outline'}
                   loading={saving}
-                  disabled={reloading || (!answered && step.type === 'question' && (selected === null || confidence === null || !step.question))}
+                  disabled={reloading || syncing || (!answered && step.type === 'question' && (selected === null || confidence === null || !step.question))}
                   onPress={answered ? continueSession : () => void saveStep()}
                 />
                 {!answered && step.type === 'question' ? <Text style={[studyStyles.caption, { textAlign: 'center' }]}>Choose an answer and your confidence to continue.</Text> : null}
@@ -272,23 +349,26 @@ export default function StudySessionScreen() {
               <LoadError message="There is no current step in this session. Reload your saved plan to continue." onRetry={reload} />
             )}
 
+            {waitingForSync && error ? <ErrorBanner message={error} /> : null}
+            {conflict ? <Card style={studyStyles.card}><Text style={studyStyles.muted}>Your local choices were kept. To discard unsynced choices and use answers already saved on the server, select the button below.</Text><Button label="Discard local choices · use server progress" variant="secondary" loading={reloading} disabled={saving || syncing} onPress={() => { if (!id) return; setReloading(true); const version = request.current; void discardPendingStudyProgress(id).then((value) => { if (version !== request.current) return; setSession(value); moveTo(value.status === 'completed' ? value.steps.length : value.current_index); setConflict(false); }).catch((err) => { if (version === request.current) setError(studyError(err, 'Could not load server progress. Your choices remain saved locally.')); }).finally(() => { if (version === request.current) setReloading(false); }); }} /></Card> : null}
+
             {answeredSteps.length ? (
               <Card style={studyStyles.card}>
                 <Pressable accessibilityRole="button" accessibilityState={{ expanded: historyOpen }} aria-expanded={historyOpen} style={studyStyles.spread} onPress={() => setHistoryOpen(!historyOpen)}>
-                  <Text style={[studyStyles.label, { flex: 1 }]}>{complete ? 'Review your answers' : 'Earlier answers'} ({answeredSteps.length})</Text>
+                  <Text style={[studyStyles.label, { flex: 1 }]}>{complete ? 'Review your answers' : 'Saved answers'} ({answeredSteps.length})</Text>
                   <Ionicons name={historyOpen ? 'chevron-up' : 'chevron-down'} size={19} color={colors.primary} />
                 </Pressable>
                 {historyOpen ? answeredSteps.map((item) => (
                   <Pressable key={item.id} accessibilityRole="button" style={styles.historyRow} onPress={() => { moveTo(item.index); setHistoryOpen(false); }}>
-                    <Ionicons name={item.feedback?.correct ? 'checkmark-circle-outline' : 'bulb-outline'} size={20} color={item.feedback?.correct ? colors.success : colors.warning} />
-                    <Text style={[studyStyles.muted, { flex: 1 }]}>{item.question?.prompt || item.title}</Text>
+                    <Ionicons name={session.offline?.pending_steps.includes(item.id) ? 'time-outline' : item.feedback?.correct ? 'checkmark-circle-outline' : 'bulb-outline'} size={20} color={item.feedback?.correct ? colors.success : colors.warning} />
+                    <Text style={[studyStyles.muted, { flex: 1 }]}>{item.question?.prompt || item.title}{session.offline?.pending_steps.includes(item.id) ? ' · awaiting sync' : ''}</Text>
                     <Ionicons name="chevron-forward" size={17} color={colors.textMuted} />
                   </Pressable>
                 )) : null}
               </Card>
             ) : null}
-            <ReviewNote />
-            <Text style={studyStyles.caption}>Pack {session.pack_version} · Saved to your account after each completed step</Text>
+            {session.review_status === 'reviewed' ? <Text style={studyStyles.caption}>Reviewed by {session.reviewed_by} · {session.reviewed_at}</Text> : <ReviewNote note={session.review_note} />}
+            <Text style={studyStyles.caption}>Pack {session.pack_version} · {pendingCount ? 'Unsynced steps are saved on this device' : 'Synced steps are saved to your account'}</Text>
           </>
         ) : null}
       </ScrollView>

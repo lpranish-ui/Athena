@@ -39,10 +39,11 @@ import {
     type BookSearchHit,
     type ReaderNote,
 } from '@/lib/api';
-import { api } from '@/lib/apiClient';
+import { api, ApiError, loadToken } from '@/lib/apiClient';
+import { useAuth } from '@/lib/auth';
 import { exportNotesMarkdown } from '@/lib/exportNotes';
 import { HIGHLIGHT_COLOR_KEYS, HIGHLIGHT_DOTS, type HighlightColor } from '@/lib/highlight-colors';
-import { getOfflineMeta, readOfflineChapter } from '@/lib/offline';
+import { assertOfflineAccount, captureOfflineAccount, deleteOfflineBook, getOfflineMeta, isOfflineNetworkError, readOfflineChapter } from '@/lib/offline';
 import type { Book, ChapterSummary } from '@/types';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -92,6 +93,8 @@ export default function ReaderScreen() {
     jumpParagraph?: string;
   }>();
   const router = useRouter();
+  const { user } = useAuth();
+  const userId = user?.id;
   const insets = useSafeAreaInsets();
 
   const [book, setBook] = useState<Book | null>(null);
@@ -148,28 +151,50 @@ export default function ReaderScreen() {
   // ── initial load: book, chapters, saved position, settings ────────────────
 
   useEffect(() => {
-    if (!bookId) return;
+    if (!bookId || !userId) return;
+    let cancelled = false;
+    const lease = captureOfflineAccount();
     void (async () => {
       try {
+        const token = await loadToken();
+        assertOfflineAccount(lease);
+        if (cancelled) return;
+        setBook(null);
+        setChapters([]);
+        setChapter(null);
+        setLoading(true);
         // Network first; fall back to the downloaded copy when unreachable.
         let bookData: Book;
         let chaptersData: ChapterSummary[];
+        let offline = false;
         try {
-          [bookData, chaptersData] = await Promise.all([
-            api.get<Book>(`/api/books/${bookId}`),
-            api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`),
+          const results = await Promise.allSettled([
+            api.get<Book>(`/api/books/${bookId}`, token),
+            api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`, token),
           ]);
+          assertOfflineAccount(lease);
+          const failures = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+          if (failures.length) throw failures.find((result) => !isOfflineNetworkError(result.reason))?.reason ?? failures[0].reason;
+          bookData = (results[0] as PromiseFulfilledResult<Book>).value;
+          chaptersData = (results[1] as PromiseFulfilledResult<ChapterSummary[]>).value;
         } catch (networkError) {
-          const meta = await getOfflineMeta(bookId);
+          if (!isOfflineNetworkError(networkError)) {
+            if (networkError instanceof ApiError && [401, 403, 404].includes(networkError.status)) await deleteOfflineBook(bookId, lease).catch(() => {});
+            throw networkError;
+          }
+          const meta = await getOfflineMeta(bookId, lease);
           if (!meta) throw networkError;
           bookData = meta.book;
           chaptersData = meta.chapters;
+          offline = true;
         }
         const [progress, settingsRaw, notesData] = await Promise.all([
-          getReadingProgress(bookId).catch(() => null),
+          offline ? Promise.resolve(null) : getReadingProgress(bookId).catch(() => null),
           AsyncStorage.getItem(SETTINGS_KEY),
-          getReaderNotes(bookId).catch(() => [] as ReaderNote[]),
+          offline ? Promise.resolve([] as ReaderNote[]) : getReaderNotes(bookId).catch(() => [] as ReaderNote[]),
         ]);
+        assertOfflineAccount(lease);
+        if (cancelled) return;
 
         setNotes(notesData);
 
@@ -219,28 +244,38 @@ export default function ReaderScreen() {
           jumpChapter && pendingParagraphRef.current !== null ? null : resumeRatio;
         setIndex(startIndex);
       } catch (err) {
+        if (cancelled) return;
         setError(err instanceof Error ? err.message : 'Could not open this book.');
         setLoading(false);
       }
     })();
-  }, [bookId, jumpChapter, jumpParagraph, pendingParagraphChapterRef, pendingParagraphRef, pendingScrollRef, ratioRef]);
+    return () => { cancelled = true; };
+  }, [bookId, userId, jumpChapter, jumpParagraph, pendingParagraphChapterRef, pendingParagraphRef, pendingScrollRef, ratioRef]);
 
   // ── load the current chapter's text ───────────────────────────────────────
 
   useEffect(() => {
     const summary = chapters[index];
-    if (!summary) return;
+    if (!summary || !userId) return;
     if (chapter?.id === summary.id) return; // already on screen — do not refetch
     let cancelled = false;
+    const lease = captureOfflineAccount();
     void (async () => {
       if (cancelled) return;
       setLoadingChapter(true);
       try {
         let data: ChapterContent;
         try {
-          data = await api.get<ChapterContent>(`/api/chapters/${summary.id}`);
+          const token = await loadToken();
+          assertOfflineAccount(lease);
+          data = await api.get<ChapterContent>(`/api/chapters/${summary.id}`, token);
+          assertOfflineAccount(lease);
         } catch (networkError) {
-          const cached = await readOfflineChapter(bookId, summary.id);
+          if (!isOfflineNetworkError(networkError)) {
+            if (networkError instanceof ApiError && [401, 403, 404].includes(networkError.status)) await deleteOfflineBook(bookId, lease).catch(() => {});
+            throw networkError;
+          }
+          const cached = await readOfflineChapter(bookId, summary.id, lease);
           if (!cached) throw networkError;
           data = { id: cached.id, title: cached.title, content: cached.content, number: cached.number ?? 0 };
         }
@@ -283,7 +318,7 @@ export default function ReaderScreen() {
     return () => {
       cancelled = true;
     };
-  }, [bookId, chapters, index, chapter?.id, tryJumpToParagraph, chapterIdRef, paragraphCountRef, pendingParagraphChapterRef, pendingParagraphRef, resetMetrics]);
+  }, [bookId, userId, chapters, index, chapter?.id, tryJumpToParagraph, chapterIdRef, paragraphCountRef, pendingParagraphChapterRef, pendingParagraphRef, resetMetrics]);
 
   // ── persist settings ──────────────────────────────────────────────────────
 

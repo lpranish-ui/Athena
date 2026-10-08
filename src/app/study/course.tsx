@@ -63,6 +63,7 @@ export default function StudyCourseScreen() {
             <Text style={studyStyles.muted}>{course.description}</Text>
             <Text style={studyStyles.caption}>{course.objective_count} objectives · {course.question_count} original questions · Source links included</Text>
             {course.review_status === 'draft' ? <ReviewNote note={course.review_note} /> : null}
+            {course.review_status === 'reviewed' ? <Text style={studyStyles.caption}>Reviewed by {course.reviewed_by} · {course.reviewed_at} · Version {course.version}</Text> : null}
           </View>
           {error ? <LoadError message={error} onRetry={() => void load()} /> : null}
 
@@ -102,8 +103,9 @@ export default function StudyCourseScreen() {
           </Card>
 
           <View style={{ gap: 6 }}>
-            <Text style={studyStyles.sectionTitle}>Your syllabus map</Text>
+            <Text style={studyStyles.sectionTitle}>Course objectives</Text>
             <Text style={studyStyles.muted}>Open an objective to read its lesson and follow the sources. Secure recall needs evidence on separate study days.</Text>
+            <Button label="Map my own syllabus" variant="secondary" onPress={() => router.push('/study/syllabus')} />
           </View>
           {course.concepts.map((concept, index) => {
             const open = expanded === concept.id;
@@ -135,6 +137,7 @@ export default function StudyCourseScreen() {
                     <View style={studyStyles.divider} />
                     <Text style={studyStyles.eyebrow}>LEARNING OBJECTIVE</Text>
                     <Text style={studyStyles.muted}>{concept.objective}</Text>
+                    <Button label="Report an issue" variant="ghost" small onPress={() => router.push({ pathname: '/study/report', params: { courseId: course.id, conceptId: concept.id } })} />
                     {concept.lesson.split(/\n\s*\n/).map((paragraph, i) => <Text key={i} style={studyStyles.body}>{paragraph}</Text>)}
                     {concept.key_points.length ? (
                       <View style={styles.keyPoints}>

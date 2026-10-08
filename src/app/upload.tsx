@@ -71,13 +71,12 @@ export default function UploadScreen() {
       return;
     }
 
-    // There is no size limit: the upload streams to the server in chunks.
-
     setBusy(true);
     setError(null);
     setProgress(0);
+    setStage('Preparing upload…');
     try {
-      // Uploads run in 8 MB chunks, so books of ANY size work.
+      // Send bounded chunks; the server validates file and extracted-text limits.
       const { bookId } = await uploadBookFile(picked, {
         title: title.trim(),
         subject: subject.trim() || 'General',
@@ -88,7 +87,7 @@ export default function UploadScreen() {
             setProgress(ratio);
             setStage(`Uploading… ${Math.round(ratio * 100)}%`);
           } else {
-            setStage('Reading your book — big books can take a minute…');
+            setStage('Reading your book — large books can take several minutes…');
           }
         },
       });
@@ -288,12 +287,12 @@ export default function UploadScreen() {
 
         <Card style={styles.tips} padded>
           <Text style={styles.tipsTitle}>Good to know</Text>
-          <Text style={styles.tip}>• Any file size works — uploads stream in the background.</Text>
+          <Text style={styles.tip}>• Files up to 512 MB are supported by default; uploads use small chunks.</Text>
           <Text style={styles.tip}>• PDFs must have selectable text — scans are not supported yet.</Text>
           <Text style={styles.tip}>• Chapters are detected from “Chapter N” style headings; otherwise the text is split into parts.</Text>
           <Text style={styles.tip}>• Your uploads stay private to your account.</Text>
           <Text style={styles.tip}>• Duplicate uploads of the same file are detected automatically.</Text>
-          <Text style={styles.tip}>• Big books (500+ pages) can take a minute to process.</Text>
+          <Text style={styles.tip}>• Big books (500+ pages) can take several minutes to process.</Text>
         </Card>
       </ScrollView>
     </Screen>

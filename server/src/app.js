@@ -2,7 +2,7 @@ import cors from 'cors';
 import express from 'express';
 import { createAiLimiter } from './ai-limit.js';
 import { answerQuestion as defaultAnswerQuestion } from './ask.js';
-import { registerAuthRoutes, requireAuth } from './auth.js';
+import { registerAuthRoutes, createRequireAuth } from './auth.js';
 import { createChapterService } from './chapters.js';
 import * as defaultDatabase from './db.js';
 import { generateMcqs as defaultGenerateMcqs, replaceQuestion as defaultReplaceQuestion } from './generate.js';
@@ -14,9 +14,10 @@ import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
 import { registerStudyRoutes } from './study.js';
 import { registerUploadRoutes } from './uploads.js';
+import { requestMonitoring } from './observability.js';
 
 /** Construct routes without connecting to a database or opening a listening socket. */
-export function createApp({ database = defaultDatabase, authenticate = requireAuth,
+export function createApp({ database = defaultDatabase, authenticate = createRequireAuth(database),
   registerAuthentication = registerAuthRoutes, services = {}, aiLimiter = createAiLimiter() } = {}) {
   const { query, one, many, withTransaction } = database;
   const app = express();
@@ -30,6 +31,7 @@ export function createApp({ database = defaultDatabase, authenticate = requireAu
 
   app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
   app.use(cors());
+  app.use(requestMonitoring());
   app.use(express.json({ limit: '4mb' }));
 
   // Health check (used by Render).

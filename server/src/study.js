@@ -1,13 +1,15 @@
 import { readFile } from 'node:fs/promises';
 import { HttpError } from './http.js';
+import { registerCurriculumRoutes } from './curriculum.js';
+import { registerContentReviewRoutes, validatePublishingMetadata } from './content-review.js';
 import { courseDetail, courseSummary, emptyProgress, localDate, planSession, rankedConcepts,
   recordAnswer, requireToday, serializeSession, validateDate, validateTimezone } from './study-planner.js';
 
 const courseFile = new URL('../data/course-packs/cardiovascular-foundations.json', import.meta.url);
 let cachedPacks;
-async function defaultPacks() {
+export async function defaultPacks() {
   // Retry a failed read (e.g. during an atomic deploy), but pin successful loads for this process.
-  cachedPacks ??= readFile(courseFile, 'utf8').then((content) => [JSON.parse(content)]).catch((error) => {
+  cachedPacks ??= readFile(courseFile, 'utf8').then((content) => [validatePublishingMetadata(JSON.parse(content))]).catch((error) => {
     cachedPacks = undefined; throw error;
   });
   return cachedPacks;
@@ -65,6 +67,12 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
     return serializeSession(row, answers);
   }
   const lockUser = (client, userId) => client.query('select pg_advisory_xact_lock(hashtextextended($1,0))', [`study:${userId}`]);
+  async function syllabusConceptIds(userId, courseId, client) {
+    const sql = 'select links from syllabus_objectives where user_id=$1 order by position';
+    const rows = client ? (await client.query(sql, [userId])).rows : await many(sql, [userId]);
+    return [...new Set(rows.flatMap((row) => row.links.filter((link) => link.course_id === courseId).map((link) => link.concept_id)))];
+  }
+  const event = (client, userId, name, key) => client.query('insert into learning_events(user_id,event_name,event_key) values ($1,$2,$3) on conflict do nothing', [userId, name, key]);
 
   return {
     async courses() { return (await loadPacks()).map(courseSummary); },
@@ -84,6 +92,7 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
           values ($1,$2,$3,$4,$5) on conflict(user_id) do update set course_id=excluded.course_id,
           daily_minutes=excluded.daily_minutes,exam_date=excluded.exam_date,timezone=excluded.timezone,updated_at=now()
           returning course_id,daily_minutes,exam_date::text,timezone`, [userId, pack.id, body.daily_minutes, examDate, timezone])).rows[0];
+        await event(client, userId, 'plan_saved', localDate(now(), timezone));
         return enrollment(row);
       });
     },
@@ -111,7 +120,8 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
       const mistakes = await many(`select concept_id,concept_title,question,selected_option,correct_option,
         explanation,misconception,confidence,created_at,resolved,sources from study_mistakes
         where user_id=$1 and course_id=$2 order by resolved asc,created_at desc limit 30`, [userId, pack.id]);
-      const ranked = rankedConcepts(pack, progress, currentNow);
+      const syllabusIds = await syllabusConceptIds(userId, pack.id);
+      const ranked = rankedConcepts(pack, progress, currentNow, syllabusIds);
       return { enrollment: enrollment(enrolled), course, local_date: date,
         summary: { total_objectives: course.concepts.length,
           practiced_objectives: course.concepts.filter((concept) => concept.progress.attempts > 0).length,
@@ -120,7 +130,7 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
         today: today ? present(today) : null, recent_sessions: sessions.map(present),
         recommended_concepts: ranked.slice(0, 3).map(({ concept, kind, priority }) => ({ id: concept.id,
           title: concept.title, reason: kind === 'repair' ? 'Repair a recent misunderstanding'
-            : kind === 'new' ? 'Learn the next course objective' : priority === 1 ? 'Due for spaced review' : 'Practise a fresh question variant' })),
+            : kind === 'new' ? (syllabusIds.includes(concept.id) ? 'Learn an objective mapped to your syllabus' : 'Learn the next course objective') : priority === 1 ? 'Due for spaced review' : 'Practise a fresh question variant' })),
         mistakes: mistakes.map((mistake) => ({ ...mistake, created_at: new Date(mistake.created_at).toISOString() })) };
     },
     async start(userId, body = {}) {
@@ -135,10 +145,11 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
         if (existing) return sessionWithAnswers(existing, client);
         const pack = await packFor(enrolled.course_id);
         const steps = planSession(pack, await loadProgress(userId, pack.id, client), enrolled.daily_minutes, currentNow,
-          { examDate: enrolled.exam_date, today: date });
+          { examDate: enrolled.exam_date, today: date, syllabusConceptIds: await syllabusConceptIds(userId, pack.id, client) });
         const row = (await client.query(`insert into study_sessions(user_id,course_id,course_title,pack_version,pack_snapshot,
           local_date,timezone,daily_minutes,steps) values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9::jsonb) returning *,local_date::text`,
         [userId, pack.id, pack.title, pack.version, JSON.stringify(pack), date, enrolled.timezone, enrolled.daily_minutes, JSON.stringify(steps)])).rows[0];
+        await event(client, userId, 'session_started', row.id);
         return sessionWithAnswers(row, client);
       });
     },
@@ -203,6 +214,7 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
         if (answers.length === row.steps.length) {
           row.status = 'completed'; row.completed_at = currentNow;
           await client.query("update study_sessions set status='completed',completed_at=$2 where id=$1", [id, currentNow]);
+          await event(client, userId, 'session_completed', row.id);
         }
         return { session: serializeSession(row, answers), feedback };
       });
@@ -211,6 +223,8 @@ export function createStudyService(database, { now = () => new Date(), loadPacks
 }
 
 export function registerStudyRoutes(app, { database, now, loadPacks } = {}) {
+  registerCurriculumRoutes(app, { database, loadPacks: loadPacks ?? defaultPacks });
+  registerContentReviewRoutes(app, { database, loadPacks: loadPacks ?? defaultPacks });
   const service = createStudyService(database, { now, loadPacks });
   const route = (handler) => async (req, res) => {
     try { res.json(await handler(req)); }

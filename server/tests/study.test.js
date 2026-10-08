@@ -189,3 +189,51 @@ integration('answer failure rolls back lesson evidence, answers, and session com
   await service.session(userA, session.id);
   assert.deepEqual(await database.many('select * from study_concept_progress where user_id=$1 order by concept_id', [userA]), beforeProgress);
 });
+
+integration('track preferences and syllabus mappings are durable, private, and explicitly confirmed', async () => {
+  const body = { track: 'usmle', goal: 'Step 1', syllabus_text: 'Explain cycle\nRenal filtration' };
+  assert.equal((await request('/api/study/preferences', { method: 'PUT', body })).status, 200);
+  assert.equal((await request('/api/study/preferences')).body.track, 'usmle');
+  assert.equal((await request('/api/study/preferences', { user: userB })).body.track, 'mbbs');
+  assert.equal((await request('/api/study/preferences', { method: 'PUT', body: { track: 'bad' } })).status, 400);
+  const imported = await request('/api/study/syllabus/import', { method: 'POST', body: { text: body.syllabus_text } });
+  assert.equal(imported.status, 200); assert.equal(imported.body.summary.mapped, 0);
+  const objective = imported.body.items[0];
+  assert.equal(objective.suggestions[0].concept_id, 'cycle');
+  const link = { links: [{ course_id: fixturePack.id, concept_id: 'cycle' }] };
+  assert.equal((await request(`/api/study/syllabus/${objective.id}`, { user: userB, method: 'PUT', body: link })).status, 404);
+  assert.equal((await request('/api/study/syllabus', { user: userB })).body.summary.total, 0);
+  assert.equal((await request(`/api/study/syllabus/${objective.id}`, { method: 'PUT', body: link })).body.summary.mapped, 1);
+  assert.equal((await request('/api/study/syllabus')).body.items[0].links[0].concept_id, 'cycle');
+  assert.equal((await request(`/api/study/syllabus/${objective.id}`, { method: 'PUT', body: { links: [{ course_id: fixturePack.id, concept_id: 'nonexistent' }] } })).status, 400);
+  const invalid = await request('/api/study/syllabus/import', { method: 'POST', body: { text: 'x'.repeat(201) } });
+  assert.equal(invalid.status, 400); assert.equal((await request('/api/study/syllabus')).body.summary.mapped, 1);
+  assert.equal((await request('/api/study/syllabus/import', { method: 'POST', body: { text: '-\n*\n1.' } })).status, 400);
+  assert.equal((await request('/api/study/syllabus')).body.summary.mapped, 1);
+  assert.equal((await request('/api/study/syllabus/import', { method: 'POST', body: { text: 'Explain flow' } })).body.summary.total, 1);
+  assert.equal((await request('/api/study/syllabus')).body.summary.mapped, 0);
+});
+
+integration('course reports are private, bounded, versioned, and reject foreign question locations', async () => {
+  const report = { course_id: fixturePack.id, concept_id: 'flow', category: 'source', message: 'The reference section is unclear.' };
+  assert.equal((await request('/api/study/reports', { method: 'POST', body: { ...report, question_id: 'cycle-q0' } })).status, 400);
+  const submitted = await request('/api/study/reports', { method: 'POST', body: report });
+  assert.equal(submitted.status, 201); assert.equal(submitted.body.status, 'open');
+  assert.equal((await request('/api/study/reports', { user: userB })).body.length, 0);
+  assert.equal((await database.one('select pack_version from course_reports where id=$1', [submitted.body.id])).pack_version, currentPack.version);
+  const oldSession = await database.one('select id,pack_version from study_sessions where user_id=$1 order by local_date limit 1', [userA]);
+  const historical = await request('/api/study/reports', { method: 'POST', body: { ...report, session_id: oldSession.id } });
+  assert.equal(historical.status, 201);
+  assert.equal((await database.one('select pack_version from course_reports where id=$1', [historical.body.id])).pack_version, oldSession.pack_version);
+  assert.equal((await request('/api/study/reports', { method: 'POST', user: userB, body: { ...report, session_id: oldSession.id } })).status, 404);
+  for (let i = 2; i < 20; i++) assert.equal((await request('/api/study/reports', { method: 'POST', body: report })).status, 201);
+  assert.equal((await request('/api/study/reports', { method: 'POST', body: report })).status, 429);
+});
+
+integration('learning events stay transactional and duplicate completion retries do not inflate metrics', async () => {
+  const duplicate = await database.many('select user_id,event_name,event_key,count(*) from learning_events group by user_id,event_name,event_key having count(*)>1');
+  assert.equal(duplicate.length, 0);
+  const finished = await database.one("select count(*)::int as count from study_sessions where user_id=$1 and status='completed'", [userA]);
+  const recorded = await database.one("select count(*)::int as count from learning_events where user_id=$1 and event_name='session_completed'", [userA]);
+  assert.equal(recorded.count, finished.count);
+});

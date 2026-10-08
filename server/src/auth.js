@@ -5,6 +5,9 @@ import crypto from 'node:crypto';
 import { promisify } from 'node:util';
 
 import * as defaultDatabase from './db.js';
+import { createAuthActionService, RESET_MESSAGE } from './auth-actions.js';
+import { createAuthEmailSender } from './auth-email.js';
+import { HttpError } from './http.js';
 
 const JWT_SECRET = process.env.JWT_SECRET ?? '';
 const TOKEN_TTL_SECONDS = 60 * 60 * 24 * 60; // 60 days — students stay signed in
@@ -19,11 +22,11 @@ function base64url(input) {
   return Buffer.from(input).toString('base64url');
 }
 
-export function signToken(userId) {
+export function signToken(userId, version=0) {
   assertAuthConfigured();
   const now = Math.floor(Date.now() / 1000);
   const header = base64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
-  const body = base64url(JSON.stringify({ sub: userId, iat: now, exp: now + TOKEN_TTL_SECONDS }));
+  const body = base64url(JSON.stringify({ sub: userId, v:version, iat: now, exp: now + TOKEN_TTL_SECONDS }));
   const data = `${header}.${body}`;
   const signature = crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
   return `${data}.${signature}`;
@@ -76,20 +79,34 @@ export async function verifyPassword(password, stored) {
 
 // ── middleware ───────────────────────────────────────────────────────────────
 
-/** Attaches `req.user = { id }` or answers 401. */
-export function requireAuth(req, res, next) {
-  const header = req.headers.authorization ?? '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : '';
-  const payload = token ? verifyToken(token) : null;
-  if (!payload) {
-    res.status(401).json({ error: 'You must be signed in.' });
-    return;
-  }
-  req.user = { id: payload.sub };
-  next();
+/** Verify current account/version as well as the signature on every request. */
+export function createRequireAuth(database=defaultDatabase) {
+  return async (req,res,next)=> {
+    const header=req.headers.authorization ?? '';
+    const token=header.startsWith('Bearer ')?header.slice(7):'';
+    const payload=token?verifyToken(token):null;
+    const version=payload?.v ?? 0; // Existing version-zero sessions survive this migration.
+    if (!payload || !Number.isSafeInteger(version) || version<0) {
+      res.status(401).json({error:'You must be signed in.'});return;
+    }
+    try {
+      const user=await database.one('select id,email,token_version,email_verified_at from users where id=$1',[payload.sub]);
+      if (!user || user.token_version!==version) {
+        res.status(401).json({error:'This session is no longer valid. Sign in again.'});return;
+      }
+      req.user={id:user.id,email:user.email,token_version:user.token_version,email_verified:!!user.email_verified_at};
+      next();
+    } catch {
+      console.error('Authentication database check failed.');
+      res.status(503).json({error:'Could not check your session. Please try again.'});
+    }
+  };
 }
+export const requireAuth=createRequireAuth();
 
-// ── routes ───────────────────────────────────────────────────────────────────
+function publicUser(user) {
+  return {id:user.id,email:user.email,email_verified:!!user.email_verified_at};
+}
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -104,7 +121,8 @@ export function createAuthLimiter({maxAttempts=60,maxAccountAttempts=15,maxConcu
     const time=now();
     for(const [key,value] of attempts) if(value.until<=time) attempts.delete(key);
     const ip=req.ip ?? req.socket?.remoteAddress ?? 'unknown';
-    const keys=[['ip:'+ip,maxAttempts],['account:'+normalizeEmail(req.body?.email),maxAccountAttempts]];
+    const account=normalizeEmail(req.body?.email) || req.user?.id || 'ip:'+ip;
+    const keys=[['ip:'+ip,maxAttempts],['account:'+account,maxAccountAttempts]];
     if(active>=maxConcurrent || keys.some(([key,max])=>(attempts.get(key)?.count ?? 0)>=max)) {
       res.set('Retry-After',active>=maxConcurrent?'5':String(Math.ceil(windowMs/1000)));
       res.status(429).json({error:'Too many sign-in attempts. Please try again later.'});
@@ -129,8 +147,42 @@ export function createAuthLimiter({maxAttempts=60,maxAccountAttempts=15,maxConcu
   };
 }
 
-export function registerAuthRoutes(app, { database=defaultDatabase, limiter=createAuthLimiter() }={}) {
+export function registerAuthRoutes(app, { database=defaultDatabase, limiter=createAuthLimiter(),
+  emailSender=createAuthEmailSender(), now=Date.now,
+  actionLimiter=createAuthLimiter({maxAttempts:30,maxAccountAttempts:30}) }={}) {
   const {one,query,withTransaction}=database;
+  const authenticate=createRequireAuth(database);
+  const actions=createAuthActionService({database,emailSender,hashPassword,verifyPassword,now});
+  const actionLimit=actionLimiter;
+  const reply=async(res,operation)=> {
+    try { res.json(await operation()); }
+    catch(error) {
+      const status=error instanceof HttpError?error.status:503;
+      if(status===503) console.error('Account security action failed.');
+      res.status(status).json({error:error instanceof HttpError?error.message:'Account security is temporarily unavailable. Please try again.'});
+    }
+  };
+  app.post('/api/auth/password-reset/request',actionLimit,async(req,res)=> {
+    const email=normalizeEmail(req.body?.email);
+    if (!EMAIL_RE.test(email) || email.length>320) {res.status(400).json({error:'Enter a valid email address.'});return;}
+    try { emailSender.assertAvailable(); }
+    catch {res.status(503).json({error:'Password reset email is currently unavailable. You can still sign in with your existing password. Please try again later.'});return;}
+    // Acknowledge before account lookup/delivery so neither status nor delivery
+    // latency reveals whether the email belongs to an account.
+    res.status(202).json({message:RESET_MESSAGE});
+    void actions.requestReset(email).catch(()=>console.error('Password reset request failed.'));
+  });
+  app.post('/api/auth/password-reset/confirm',actionLimit,(req,res)=>reply(res,()=>actions.reset(req.body?.token,req.body?.password)));
+  app.post('/api/auth/verification/request',authenticate,actionLimit,async(req,res)=> {
+    try { res.status(202).json(await actions.requestVerification(req.user.id)); }
+    catch(error) {
+      const status=error instanceof HttpError?error.status:503;
+      res.status(status).json({error:error instanceof HttpError?error.message:'Verification email is temporarily unavailable. Please try again.'});
+    }
+  });
+  app.post('/api/auth/verification/confirm',actionLimit,(req,res)=>reply(res,()=>actions.verify(req.body?.token)));
+  app.post('/api/auth/signout-all',authenticate,(req,res)=>reply(res,()=>actions.revoke(req.user.id,req.user.token_version)));
+  app.post('/api/auth/password/change',authenticate,actionLimit,(req,res)=>reply(res,()=>actions.changePassword(req.user.id,req.user.token_version,req.body?.currentPassword,req.body?.password)));
   app.post('/api/auth/signup', limiter, async (req, res) => {
     try {
       assertAuthConfigured();
@@ -142,8 +194,8 @@ export function registerAuthRoutes(app, { database=defaultDatabase, limiter=crea
         res.status(400).json({ error: 'Please enter a valid email address.' });
         return;
       }
-      if (password.length < 6 || password.length > 1024) {
-        res.status(400).json({ error: 'The password must be between 6 and 1024 characters.' });
+      if (password.length < 8 || password.length > 1024) {
+        res.status(400).json({ error: 'The password must be between 8 and 1024 characters.' });
         return;
       }
 
@@ -155,15 +207,15 @@ export function registerAuthRoutes(app, { database=defaultDatabase, limiter=crea
 
       const passwordHash=await hashPassword(password);
       const created=await withTransaction(async (client)=> {
-        const user=(await client.query('insert into users(email,password_hash) values ($1,$2) returning id,email',
+        const user=(await client.query('insert into users(email,password_hash) values ($1,$2) returning id,email,token_version,email_verified_at',
           [email,passwordHash])).rows[0];
         await client.query('insert into profiles(id,full_name) values ($1,$2)',[user.id,fullName]);
         return user;
       });
 
       res.status(201).json({
-        token: signToken(created.id),
-        user: { id: created.id, email: created.email },
+        token: signToken(created.id,created.token_version),
+        user: publicUser(created),
         needsConfirmation: false,
       });
     } catch (error) {
@@ -171,7 +223,7 @@ export function registerAuthRoutes(app, { database=defaultDatabase, limiter=crea
         res.status(409).json({ error: 'An account with this email already exists. Sign in instead.' });
         return;
       }
-      console.error('signup failed:', error.message);
+      console.error('Account signup failed.');
       res.status(500).json({ error: 'Could not create your account. Please try again.' });
     }
   });
@@ -183,7 +235,7 @@ export function registerAuthRoutes(app, { database=defaultDatabase, limiter=crea
       const password = String(req.body?.password ?? '');
       if(password.length>1024) {res.status(400).json({error:'The password is too long.'});return;}
       const user = await one(
-        'select id, email, password_hash from users where lower(email) = $1',
+        'select id, email, password_hash,token_version,email_verified_at from users where lower(email) = $1',
         [email],
       );
       if (!user || !(await verifyPassword(password, user.password_hash))) {
@@ -191,38 +243,39 @@ export function registerAuthRoutes(app, { database=defaultDatabase, limiter=crea
         return;
       }
 
-      res.json({ token: signToken(user.id), user: { id: user.id, email: user.email } });
+      res.json({ token: signToken(user.id,user.token_version), user: publicUser(user) });
     } catch (error) {
-      console.error('signin failed:', error.message);
+      console.error('Account signin failed.');
       res.status(500).json({ error: 'Could not sign you in. Please try again.' });
     }
   });
 
-  app.post('/api/auth/refresh', requireAuth, async (req,res)=> {
+  app.post('/api/auth/refresh', authenticate, async (req,res)=> {
     try {
-      const user=await one('select id,email from users where id=$1',[req.user.id]);
-      if(!user) {res.status(401).json({error:'This account no longer exists.'});return;}
-      res.json({token:signToken(user.id),user:{id:user.id,email:user.email}});
+      // Never mint a newer version for a session revoked after middleware ran.
+      const user=await one('select id,email,token_version,email_verified_at from users where id=$1 and token_version=$2',[req.user.id,req.user.token_version]);
+      if(!user) {res.status(401).json({error:'This session is no longer valid. Sign in again.'});return;}
+      res.json({token:signToken(user.id,user.token_version),user:publicUser(user)});
     } catch(error) {
-      console.error('token refresh failed:',error?.message ?? error);
+      console.error('Session refresh failed.');
       res.status(503).json({error:'Could not refresh your session. Please try again.'});
     }
   });
 
-  app.get('/api/me', requireAuth, async (req,res)=> {
+  app.get('/api/me', authenticate, async (req,res)=> {
     try {
-      const user=await one('select id,email from users where id=$1',[req.user.id]);
+      const user=await one('select id,email,token_version,email_verified_at from users where id=$1',[req.user.id]);
       if(!user) {res.status(401).json({error:'This account no longer exists.'});return;}
       const profile=await one('select * from profiles where id=$1',[user.id]);
-      res.json({user:{id:user.id,email:user.email},profile});
+      res.json({user:publicUser(user),profile});
     } catch(error) {
-      console.error('session lookup failed:',error?.message ?? error);
+      console.error('Session lookup failed.');
       res.status(503).json({error:'Could not load your session. Please try again.'});
     }
   });
 
   // Saves the study profile (name, school, exam target + date, …).
-  app.put('/api/profile', requireAuth, async (req, res) => {
+  app.put('/api/profile', authenticate, async (req, res) => {
     try {
       const body = req.body ?? {};
       const allowed = ['full_name', 'school', 'year_of_study', 'country', 'target_exam', 'exam_date'];
@@ -251,18 +304,18 @@ export function registerAuthRoutes(app, { database=defaultDatabase, limiter=crea
       );
       res.json(updated);
     } catch (error) {
-      console.error('profile update failed:', error.message);
+      console.error('Profile update failed.');
       res.status(500).json({ error: 'Could not save your profile. Please try again.' });
     }
   });
 
   // Deletes the caller's account and every row that belongs to it (FK cascades).
-  app.delete('/api/account', requireAuth, async (req, res) => {
+  app.delete('/api/account', authenticate, async (req, res) => {
     try {
       await query('delete from users where id = $1', [req.user.id]);
       res.json({ ok: true });
     } catch (error) {
-      console.error('account deletion failed:', error.message);
+      console.error('Account deletion failed.');
       res.status(500).json({ error: 'Could not delete your account. Please try again.' });
     }
   });

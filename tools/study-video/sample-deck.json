@@ -1,0 +1,32 @@
+{
+  "kind": "deck",
+  "title": "Cell Biology Essentials",
+  "subtitle": "High-yield recall for exam prep",
+  "cards": [
+    {
+      "front": "What is the primary function of the mitochondrion?",
+      "back": "To produce ATP through cellular respiration - the main energy currency of the cell.",
+      "topic": "Organelles"
+    },
+    {
+      "front": "Which organelle is responsible for protein synthesis?",
+      "back": "The ribosome. Free ribosomes make cytosolic proteins; ribosomes on the rough endoplasmic reticulum make proteins destined for membranes or secretion.",
+      "topic": "Organelles"
+    },
+    {
+      "front": "What is the difference between prokaryotic and eukaryotic cells?",
+      "back": "Prokaryotic cells have no membrane-bound nucleus or organelles; eukaryotic cells have a true nucleus and membrane-bound organelles.",
+      "topic": "Cell types"
+    },
+    {
+      "front": "What is osmosis?",
+      "back": "The passive movement of water across a semipermeable membrane from an area of lower solute concentration to higher solute concentration.",
+      "topic": "Transport"
+    },
+    {
+      "front": "What is the role of the Golgi apparatus?",
+      "back": "It modifies, sorts and packages proteins and lipids received from the endoplasmic reticulum for transport to their final destinations.",
+      "topic": "Organelles"
+    }
+  ]
+}

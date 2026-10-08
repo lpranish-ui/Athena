@@ -53,3 +53,6 @@ bootlog.txt
 
 smoke*.txt
 __pycache__/
+
+# generated media artifacts (study video renders, render caches)
+artifacts/

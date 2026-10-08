@@ -1,4 +1,4 @@
-import { Link, useRouter } from 'expo-router';
+import { Link } from 'expo-router';
 import { useState } from 'react';
 import {
     KeyboardAvoidingView,
@@ -17,15 +17,14 @@ import { colors, spacing } from '@/theme';
 
 export default function SignUpScreen() {
   const { signUp } = useAuth();
-  const router = useRouter();
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [confirmationSent, setConfirmationSent] = useState(false);
 
   const onSubmit = async () => {
+    if (busy) return;
     if (!fullName.trim()) {
       setError('Tell us your name so your profile looks right.');
       return;
@@ -34,8 +33,8 @@ export default function SignUpScreen() {
       setError('Enter an email and a password.');
       return;
     }
-    if (password.length < 6) {
-      setError('Use a password with at least 6 characters.');
+    if (password.length < 8) {
+      setError('Use a password with at least 8 characters.');
       return;
     }
 
@@ -48,27 +47,8 @@ export default function SignUpScreen() {
       setError(result.error);
       return;
     }
-    if (result.needsConfirmation) {
-      setConfirmationSent(true);
-    }
-    // Without email confirmation the (auth) layout signs the user straight in.
+    // The account opens immediately; email verification is available in Account security.
   };
-
-  if (confirmationSent) {
-    return (
-      <Screen>
-        <View style={styles.confirmWrap}>
-          <Brand />
-          <Text style={styles.confirmTitle}>Check your inbox</Text>
-          <Text style={styles.confirmText}>
-            We sent a confirmation link to <Text style={styles.bold}>{email.trim()}</Text>. Open
-            it, then come back and sign in.
-          </Text>
-          <Button label="Back to sign in" onPress={() => router.replace('/sign-in')} />
-        </View>
-      </Screen>
-    );
-  }
 
   return (
     <Screen>
@@ -84,7 +64,7 @@ export default function SignUpScreen() {
           <View style={styles.hero}>
             <Brand />
             <Text style={styles.tagline}>
-              Create your account — your library stays private to you.
+              Build a steady daily learning habit. Your progress and private library stay with your account.
             </Text>
           </View>
 
@@ -112,12 +92,13 @@ export default function SignUpScreen() {
               label="Password"
               value={password}
               onChangeText={setPassword}
-              placeholder="At least 6 characters"
+              placeholder="At least 8 characters"
               secureTextEntry
               textContentType="newPassword"
               onSubmitEditing={onSubmit}
             />
             <Button label="Create account" onPress={onSubmit} loading={busy} />
+            <Text style={styles.tagline}>You can verify your email from Account security after signing up.</Text>
           </View>
 
           <View style={styles.footer}>
@@ -126,6 +107,7 @@ export default function SignUpScreen() {
               Sign in
             </Link>
           </View>
+          <Link href="/preview" style={[styles.link,{textAlign:"center"}]}>Try a lesson first</Link>
         </ScrollView>
       </KeyboardAvoidingView>
     </Screen>
@@ -167,28 +149,6 @@ const styles = StyleSheet.create({
   link: {
     color: colors.primary,
     fontSize: 14,
-    fontWeight: '700',
-  },
-  confirmWrap: {
-    flex: 1,
-    justifyContent: 'center',
-    gap: spacing.lg,
-    maxWidth: 460,
-    width: '100%',
-    alignSelf: 'center',
-  },
-  confirmTitle: {
-    color: colors.text,
-    fontSize: 24,
-    fontWeight: '800',
-  },
-  confirmText: {
-    color: colors.textMuted,
-    fontSize: 15,
-    lineHeight: 22,
-  },
-  bold: {
-    color: colors.text,
     fontWeight: '700',
   },
 });

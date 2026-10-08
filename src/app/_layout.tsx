@@ -68,6 +68,9 @@ function RootNavigator() {
       }}
     >
       <Stack.Screen name="index" />
+      <Stack.Screen name="preview" options={{ ...headerOptions, title: 'Try Athena' }} />
+      <Stack.Screen name="reset-password" options={{ ...headerOptions, title: 'Reset password' }} />
+      <Stack.Screen name="verify-email" options={{ ...headerOptions, title: 'Verify email' }} />
       <Stack.Screen name="s/[token]" options={{ ...headerOptions, title: 'Shared with you' }} />
       <Stack.Protected guard={!session}>
       <Stack.Screen name="(auth)" />
@@ -95,6 +98,11 @@ function RootNavigator() {
       <Stack.Screen name="reader/[bookId]" options={{ headerShown: false }} />
       <Stack.Screen name="notes" options={{ ...headerOptions, title: 'Highlights & notes' }} />
       <Stack.Screen name="study/course" options={{ ...headerOptions, title: 'Your course' }} />
+      <Stack.Screen name="study/preferences" options={{ ...headerOptions, title: 'Study preferences' }} />
+      <Stack.Screen name="study/syllabus" options={{ ...headerOptions, title: 'Your syllabus' }} />
+      <Stack.Screen name="study/report" options={{ ...headerOptions, title: 'Report content' }} />
+      <Stack.Screen name="account/security" options={{ ...headerOptions, title: 'Account security' }} />
+      <Stack.Screen name="help" options={{ ...headerOptions, title: 'Help & feedback' }} />
       <Stack.Screen name="study/mistakes" options={{ ...headerOptions, title: 'Mistake journal' }} />
       <Stack.Screen name="study/session/[id]" options={{ ...headerOptions, title: 'Daily session' }} />
       </Stack.Protected>

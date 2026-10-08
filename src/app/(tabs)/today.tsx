@@ -6,15 +6,21 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'r
 import { LoadError } from '@/components/LoadError';
 import { Screen } from '@/components/Screen';
 import { Badge, Button, Card, ErrorBanner, LoadingView } from '@/components/ui';
+import { StudyTrackPicker } from '@/components/study/StudyTrackPicker';
 import { EnrollmentForm, ProgressBar, ReviewNote, Stat, studyError, studyStyles } from '@/components/study/StudyUI';
-import { getStudyCourses, getStudyDashboard, saveStudyEnrollment, startStudySession } from '@/lib/study';
+import { getStudyCourses, getStudyDashboard, saveStudyEnrollment, startStudySession, type OfflineStudyDashboard } from '@/lib/study';
+import { getStudyPreferences, getStudyTrack, saveStudyPreferences, SHARED_PILOT_NOTE, type StudyPreferences, type StudyTrack } from '@/lib/tracks';
 import { colors, withAlpha } from '@/theme';
-import type { CourseSummary, StudyDashboard } from '@/types/study';
+import type { CourseSummary } from '@/types/study';
 
 export default function TodayScreen() {
   const router = useRouter();
-  const [dashboard, setDashboard] = useState<StudyDashboard | null>(null);
+  const [dashboard, setDashboard] = useState<OfflineStudyDashboard | null>(null);
   const [pack, setPack] = useState<CourseSummary | null>(null);
+  const [preferences, setPreferences] = useState<StudyPreferences | null>(null);
+  const [preferencesError, setPreferencesError] = useState<string | null>(null);
+  const [track, setTrack] = useState<StudyTrack>('mbbs');
+  const [goal, setGoal] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -24,7 +30,18 @@ export default function TodayScreen() {
   const load = useCallback(async () => {
     const version = ++request.current;
     try {
-      const data = await getStudyDashboard();
+      const [planResult, preferencesResult] = await Promise.allSettled([getStudyDashboard(), getStudyPreferences()]);
+      if (version !== request.current) return;
+      if (preferencesResult.status === 'fulfilled') {
+        setPreferences(preferencesResult.value);
+        setTrack(preferencesResult.value.track);
+        setGoal(preferencesResult.value.goal || '');
+        setPreferencesError(null);
+      } else {
+        setPreferencesError(studyError(preferencesResult.reason, 'Could not load your study goals.'));
+      }
+      if (planResult.status === 'rejected') throw planResult.reason;
+      const data = planResult.value;
       const courses = data.enrollment ? null : await getStudyCourses();
       if (version !== request.current) return;
       setDashboard(data);
@@ -65,6 +82,8 @@ export default function TodayScreen() {
   const enrollment = dashboard?.enrollment;
   const summary = dashboard?.summary;
   const today = dashboard?.today;
+  const pendingSteps = dashboard?.offline?.pending_steps || 0;
+  const syncMessage = dashboard?.offline?.sync_message;
   const unresolved = dashboard?.mistakes.filter((mistake) => !mistake.resolved) || [];
   const unresolvedConcepts = new Set(unresolved.map((mistake) => mistake.concept_id)).size;
   const daysUntilExam = enrollment?.exam_date && dashboard?.local_date
@@ -98,6 +117,28 @@ export default function TodayScreen() {
           </View>
         ) : null}
 
+        {dashboard?.offline?.cached ? (
+          <Card style={studyStyles.card}>
+            <Badge label="SAVED PLAN · OFFLINE" color={colors.warning} />
+            <Text style={studyStyles.muted}>Connect to create a new plan. Previously downloaded sessions can continue offline; answers sync for grading.</Text>
+            <Text style={studyStyles.caption}>Saved {new Date(dashboard.offline.saved_at).toLocaleString()}. Session counts reflect the last synced plan.</Text>
+          </Card>
+        ) : null}
+
+        {pendingSteps > 0 || syncMessage ? (
+          <Card style={studyStyles.card}>
+            <Badge label={pendingSteps > 0 ? `${pendingSteps} ${pendingSteps === 1 ? 'ANSWER' : 'ANSWERS'} WAITING FOR GRADING` : 'SYNC NEEDS ATTENTION'} color={colors.warning} />
+            <Text style={studyStyles.muted}>Your local answers are kept. Progress and recall totals update after the server grades them.</Text>
+            {syncMessage ? <Text accessibilityRole="alert" style={studyStyles.muted}>{syncMessage}</Text> : null}
+            {today ? (
+              <>
+                <Text style={studyStyles.caption}>Open your saved session to finish syncing or review conflicting answers.</Text>
+                <Button label="Open saved session" variant="secondary" icon="play-outline" onPress={() => router.push({ pathname: '/study/session/[id]', params: { id: today.id } })} />
+              </>
+            ) : null}
+          </Card>
+        ) : null}
+
         {dashboard && !enrollment && pack ? (
           <>
             <Card style={[studyStyles.card, styles.hero]}>
@@ -112,6 +153,20 @@ export default function TodayScreen() {
                   </View>
                 ))}
               </View>
+              <Button label="Try a two-minute preview" variant="secondary" icon="play-outline" onPress={() => router.push('/preview')} />
+            </Card>
+            <Card style={studyStyles.card}>
+              <Text style={studyStyles.eyebrow}>YOUR DIRECTION</Text>
+              <Text style={studyStyles.sectionTitle}>Choose your study goal</Text>
+              {preferences ? (
+                <>
+                  <StudyTrackPicker track={track} goal={goal} onTrackChange={setTrack} onGoalChange={setGoal} disabled={starting} />
+                  <Text style={studyStyles.caption}>Your selection saves when you start your first session.</Text>
+                </>
+              ) : null}
+              {preferencesError ? <LoadError message={preferencesError} onRetry={() => void load()} /> : null}
+              <Text style={studyStyles.caption}>{SHARED_PILOT_NOTE}</Text>
+              <Button label="Edit goals or bring your syllabus" variant="ghost" icon="map-outline" onPress={() => router.push('/study/preferences')} />
             </Card>
             <Card style={studyStyles.card}>
               <View style={studyStyles.row}>
@@ -127,10 +182,25 @@ export default function TodayScreen() {
                 <Text style={studyStyles.link}>Explore the syllabus and sources →</Text>
               </Pressable>
               <View style={studyStyles.divider} />
-              <EnrollmentForm courseId={pack.id} onSave={async (input) => {
-                await saveStudyEnrollment(input);
-                await load();
-              }} />
+              {preferences ? (
+                <EnrollmentForm courseId={pack.id} label="Start my first session" onSave={async (input) => {
+                  setStarting(true);
+                  setError(null);
+                  try {
+                    await saveStudyPreferences({ track, goal: goal.trim() || null, syllabus_text: preferences.syllabus_text });
+                    await saveStudyEnrollment(input);
+                    const session = await startStudySession();
+                    router.push({ pathname: '/study/session/[id]', params: { id: session.id } });
+                  } catch (err) {
+                    // An enrollment can succeed before session creation fails.
+                    await load();
+                    setError(studyError(err, 'Could not start your first session. Please try again.'));
+                    throw err;
+                  } finally {
+                    setStarting(false);
+                  }
+                }} />
+              ) : <Text style={studyStyles.caption}>Load your study goals above to start a saved plan.</Text>}
               {pack.review_status === 'draft' ? <ReviewNote note={pack.review_note} /> : null}
             </Card>
           </>
@@ -149,29 +219,44 @@ export default function TodayScreen() {
           <>
             <Card style={[studyStyles.card, styles.hero]}>
               <View style={studyStyles.spread}>
-                <Badge label={today?.status === 'completed' ? 'TODAY COMPLETE' : today ? 'READY TO RESUME' : 'YOUR NEXT SESSION'} />
+                <Badge label={pendingSteps > 0 ? 'ANSWERS SAVED LOCALLY' : today?.status === 'completed' ? 'TODAY COMPLETE' : today ? 'READY TO RESUME' : 'YOUR NEXT SESSION'} />
                 <View style={studyStyles.row}>
                   <Ionicons name="time-outline" size={15} color={colors.textMuted} />
                   <Text style={studyStyles.caption}>{today?.estimated_minutes || enrollment.daily_minutes} min</Text>
                 </View>
               </View>
-              <Text style={styles.heroTitle}>{today?.status === 'completed' ? 'Good work today.' : today ? 'Pick up where you left off.' : 'One session. A clearer understanding.'}</Text>
-              <Text style={studyStyles.muted}>{today?.status === 'completed'
+              <Text style={styles.heroTitle}>{pendingSteps > 0 ? 'Your answers are saved.' : today?.status === 'completed' ? 'Good work today.' : today ? 'Pick up where you left off.' : 'One session. A clearer understanding.'}</Text>
+              <Text style={studyStyles.muted}>{pendingSteps > 0
+                ? 'Resume your saved session to finish practice or sync answers for grading.'
+                : today?.status === 'completed'
                 ? 'Your progress is saved. Give your memory time to work; a new plan will be ready tomorrow.'
                 : 'A short lesson, a few questions, and focused repair where you need it.'}</Text>
               {today ? (
                 <View style={{ gap: 8 }}>
                   <ProgressBar value={today.total_steps ? today.completed_steps / today.total_steps * 100 : 0} label={`${today.completed_steps} of ${today.total_steps} session steps completed`} />
-                  <Text style={studyStyles.caption}>{today.completed_steps} of {today.total_steps} steps saved</Text>
+                  <Text style={studyStyles.caption}>{today.completed_steps} of {today.total_steps} steps synced</Text>
                 </View>
               ) : null}
               <Button
-                label={today?.status === 'completed' ? 'See session recap' : today ? 'Resume session' : 'Start today’s session'}
-                icon={today?.status === 'completed' ? 'checkmark-circle-outline' : 'arrow-forward'}
+                label={pendingSteps > 0 ? 'Resume session to sync' : today?.status === 'completed' ? 'See session recap' : today ? 'Resume session' : 'Start today’s session'}
+                icon={!pendingSteps && today?.status === 'completed' ? 'checkmark-circle-outline' : 'arrow-forward'}
                 loading={starting}
+                disabled={!!dashboard?.offline?.cached && !today}
                 onPress={() => void openSession()}
               />
               <Text style={studyStyles.caption}>Your answers save after each step. Come back whenever you need to.</Text>
+            </Card>
+
+            <Card style={studyStyles.card}>
+              <View style={studyStyles.row}>
+                <Ionicons name="compass-outline" size={23} color={colors.accent} />
+                <Text style={[studyStyles.sectionTitle, { flex: 1 }]}>{preferences ? getStudyTrack(preferences.track).title : 'Your study goals'}</Text>
+              </View>
+              {preferences?.goal ? <Text style={studyStyles.body}>{preferences.goal}</Text> : <Text style={studyStyles.muted}>Keep your daily practice connected to your coursework or exam goal.</Text>}
+              {preferencesError ? <LoadError message={preferencesError} onRetry={() => void load()} /> : null}
+              <Text style={studyStyles.caption}>{SHARED_PILOT_NOTE}</Text>
+              <Button label="Edit goals & syllabus" variant="secondary" icon="options-outline" onPress={() => router.push('/study/preferences')} />
+              <Button label="View your objective map" variant="ghost" icon="map-outline" onPress={() => router.push('/study/syllabus')} />
             </Card>
 
             <Card style={studyStyles.card}>

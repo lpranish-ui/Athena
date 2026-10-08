@@ -457,3 +457,59 @@ create table if not exists study_mistakes (
   primary key (user_id,course_id,question_id)
 );
 create index if not exists study_mistakes_user_idx on study_mistakes(user_id,course_id,resolved,created_at desc);
+
+-- Additive migration: existing accounts and version-zero sessions remain valid.
+alter table users add column if not exists token_version int not null default 0;
+alter table users add column if not exists email_verified_at timestamptz;
+
+create table if not exists auth_action_tokens (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  purpose text not null check (purpose in ('password_reset','email_verification')),
+  token_hash text not null unique,
+  expires_at timestamptz not null,
+  consumed_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create index if not exists auth_action_tokens_user_idx on auth_action_tokens(user_id,purpose);
+create index if not exists auth_action_tokens_expiry_idx on auth_action_tokens(expires_at);
+
+
+create table if not exists study_preferences (
+  user_id uuid primary key references users(id) on delete cascade,
+  track text not null default 'mbbs' check (track in ('mbbs','usmle','postgraduate')),
+  goal text check (length(goal)<=160),
+  syllabus_text text check (length(syllabus_text)<=20000),
+  updated_at timestamptz not null default now()
+);
+create table if not exists syllabus_objectives (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  position integer not null check (position between 0 and 99),
+  title text not null check (length(title) between 1 and 200),
+  links jsonb not null default '[]'::jsonb check (jsonb_typeof(links)='array' and jsonb_array_length(links)<=5),
+  updated_at timestamptz not null default now(),
+  unique(user_id,position)
+);
+create table if not exists course_reports (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references users(id) on delete cascade,
+  course_id text not null,
+  pack_version text not null,
+  concept_id text not null,
+  question_id text,
+  category text not null check (category in ('accuracy','source','unclear','other')),
+  message text not null check (length(message) between 10 and 2000),
+  status text not null default 'open' check (status in ('open','triaged','resolved')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists course_reports_queue_idx on course_reports(status,created_at);
+create table if not exists learning_events (
+  user_id uuid not null references users(id) on delete cascade,
+  event_name text not null check (event_name in ('plan_saved','session_started','session_completed')),
+  event_key text not null,
+  created_at timestamptz not null default now(),
+  primary key(user_id,event_name,event_key)
+);
+create index if not exists learning_events_time_idx on learning_events(event_name,created_at);

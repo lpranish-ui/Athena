@@ -1,0 +1,25 @@
+{
+  "kind": "quiz",
+  "title": "Cell Biology - Rapid Fire",
+  "subtitle": "Four questions to test yourself",
+  "questions": [
+    {
+      "question": "Which of the following is the site of the Krebs cycle?",
+      "options": ["Cytosol", "Mitochondrial matrix", "Nucleus", "Golgi apparatus"],
+      "correctIndex": 1,
+      "explanation": "The Krebs (citric acid) cycle takes place in the mitochondrial matrix; glycolysis occurs in the cytosol."
+    },
+    {
+      "question": "During which phase of mitosis do sister chromatids separate and move to opposite poles?",
+      "options": ["Prophase", "Metaphase", "Anaphase", "Telophase"],
+      "correctIndex": 2,
+      "explanation": "In anaphase, spindle fibers pull sister chromatids apart toward opposite poles."
+    },
+    {
+      "question": "Which transport process requires energy input from the cell?",
+      "options": ["Simple diffusion", "Facilitated diffusion", "Osmosis", "Sodium-potassium pump"],
+      "correctIndex": 3,
+      "explanation": "The sodium-potassium pump is active transport: it hydrolyzes ATP to move ions against their concentration gradients."
+    }
+  ]
+}

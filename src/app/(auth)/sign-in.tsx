@@ -16,13 +16,14 @@ import { useAuth } from '@/lib/auth';
 import { colors, spacing } from '@/theme';
 
 export default function SignInScreen() {
-  const { signIn, signInWithGoogle } = useAuth();
+  const { signIn } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const onSubmit = async () => {
+    if (busy) return;
     if (!email.trim() || !password) {
       setError('Enter your email and password to continue.');
       return;
@@ -35,16 +36,6 @@ export default function SignInScreen() {
       setError(result.error);
     }
     // On success the (auth) layout redirects to the app automatically.
-  };
-
-  const onGoogle = async () => {
-    setBusy(true);
-    setError(null);
-    const result = await signInWithGoogle();
-    setBusy(false);
-    if (result.error) {
-      setError(result.error);
-    }
   };
 
   return (
@@ -61,7 +52,7 @@ export default function SignInScreen() {
           <View style={styles.hero}>
             <Brand />
             <Text style={styles.tagline}>
-              Turn any medical book into quizzes. Study smarter, one chapter at a time.
+              A clear daily plan. Short lessons. Practice that helps yesterday’s learning stick.
             </Text>
           </View>
 
@@ -87,18 +78,7 @@ export default function SignInScreen() {
               onSubmitEditing={onSubmit}
             />
             <Button label="Sign in" onPress={onSubmit} loading={busy} />
-            <View style={styles.divider}>
-              <View style={styles.dividerLine} />
-              <Text style={styles.dividerText}>or</Text>
-              <View style={styles.dividerLine} />
-            </View>
-            <Button
-              label="Continue with Google"
-              variant="secondary"
-              icon="logo-google"
-              onPress={() => void onGoogle()}
-              loading={busy}
-            />
+            <Link href="/forgot-password" style={styles.link}>Forgot your password?</Link>
           </View>
 
           <View style={styles.footer}>
@@ -107,6 +87,7 @@ export default function SignInScreen() {
               Create an account
             </Link>
           </View>
+          <Link href="/preview" style={[styles.link,{textAlign:"center"}]}>Try a lesson before signing up</Link>
         </ScrollView>
       </KeyboardAvoidingView>
     </Screen>
@@ -149,19 +130,5 @@ const styles = StyleSheet.create({
     color: colors.primary,
     fontSize: 14,
     fontWeight: '700',
-  },
-  divider: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: colors.border,
-  },
-  dividerText: {
-    color: colors.textMuted,
-    fontSize: 12,
   },
 });

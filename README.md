@@ -125,8 +125,9 @@ The default file limit is **512 MB**, configurable through server
 
 Searchable PDFs use Poppler's `pdftotext` in the API Docker image. Local development
 falls back to pdf.js when Poppler is absent. EPUB extraction inflates only package
-metadata and spine text, excluding image payloads. Extracted text is limited to
-six million characters; oversized books fail with a request to split volumes
+metadata and spine text, excluding image payloads. Extracted text defaults to a
+24-million-character limit, configurable through `MAX_EXTRACTED_TEXT_CHARS`
+(up to 67,108,864 characters); oversized books fail with a request to split volumes
 instead of silently losing later chapters. Chapter writes and the ready status
 commit together, and replaying a completed job preserves existing chapter IDs.
 
@@ -192,9 +193,9 @@ signing. For the existing EAS preview profile, use
 `npx eas-cli@latest build --platform android --profile preview`
 ([EAS setup](https://docs.expo.dev/build/setup/)).
 
-Future work includes broader licensed starter material, an admin question-review
-dashboard and offline question sessions with synchronization. Offline book-text
-reading is already available. Replace the Expo placeholder icons before release.
+Future work includes broader reviewed course packs, an admin question-review
+dashboard and durable AI-generation jobs. Offline book reading and downloaded
+daily sessions with synchronization are available. Replace the Expo placeholder icons before release.
 Ship original or appropriately licensed default content, and keep provider/JWT
 secrets in the server environment.
 
@@ -220,3 +221,68 @@ can resume, and repeated submissions do not create duplicate answers. Server-sid
 grading controls the result. The course API lives under `/api/study/` and requires
 authentication. Its additive tables are bootstrapped by the existing schema
 startup. Course-pack data is included in the API Docker image.
+
+## Launch foundation
+
+Choose an **MBBS**, **USMLE**, or **postgraduate entrance** track and save a
+specific study goal in Today or Study preferences. All three currently share
+the draft cardiovascular pilot; a track does not unlock exam-specific coverage.
+The public `/preview` route demonstrates a lesson, confidence-based question
+and explanatory feedback without creating an account or changing saved progress.
+
+Paste a syllabus, one objective per line, in Study preferences or `/study/syllabus`.
+Imports accept up to 100 objectives of 200 characters each. Importing replaces
+the prior objective list and mappings, while preserving learning history.
+Word-based suggestions require explicit confirmation. Unmatched objectives
+remain visible as coverage gaps. Confirmed mappings prioritize new learning;
+mistake repair and due review retain precedence. Saving syllabus text alone
+does not replace confirmed mappings.
+
+Private downloads and cached daily sessions are scoped to the signed-in account.
+Legacy unscoped downloads are discarded. Logout, revoked sessions and account
+deletion invalidate in-flight storage work and purge private local data. Only
+network failures permit cached reading; authorization failures do not.
+Downloaded sessions can save answers offline in order. Pending choices do not
+earn grades or mastery until the server confirms them. Sync retries are
+idempotent; differing answers from another device require an explicit decision.
+Open the saved session to sync and read its feedback. Today also attempts a
+bounded sync of its current cached session when the API becomes available.
+
+Account security supports changing a password, signing out all devices and
+requesting email verification. Password recovery uses hashed, expiring,
+single-use email links. Configure `RESEND_API_KEY`, `AUTH_EMAIL_FROM` (verified
+sender), and `AUTH_PUBLIC_URL` (the public web app URL) in the API environment
+to enable account emails. Missing configuration returns an explicit unavailable
+message; no reset token is returned through the API or printed in logs. Existing
+accounts remain usable; verification is visible and is not yet a sign-in gate.
+
+Course objectives and graded daily questions offer **Report an issue**. Reports
+are versioned and private to the reporter, with open/triaged/resolved status in
+Help & feedback. Operators can triage with `server/scripts/review-reports.js`;
+there is no public administrator route. Publishing checks require reviewer/date
+metadata and distribution provenance before a pack can declare itself reviewed.
+These checks cannot replace a qualified medical editor's review.
+
+Minimal first-party learning events record plan saves and session starts and
+completions transactionally. They contain no book text, answer choices or email.
+Run `server/scripts/launch-metrics.js` with the intended server database to see
+aggregate activity and seven-day return to a completed session. Collection begins
+with this release. Request IDs and structured slow/error logs support diagnosis;
+external crash reporting and automated alerts still require operational setup.
+See [operations and release checks](docs/operations.md).
+
+## Run the whole app locally
+
+With Docker Desktop running and dependencies installed in the root and `server/`:
+
+```bash
+npm run local
+```
+
+This starts the existing local PostgreSQL service, bootstraps its additive schema,
+starts the watched API on port 8787, and opens Expo web on
+`http://localhost:8081`. It does not read hosted API credentials or modify `.env`.
+Paid AI generation and account emails are disabled in this local launcher.
+The local JWT secret is regenerated on restart, so sign in again afterward.
+Set `ATHENA_LOCAL_API_PORT` and `ATHENA_LOCAL_WEB_PORT` to choose different ports.
+The PostgreSQL volume persists local accounts and progress between restarts.

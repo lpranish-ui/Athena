@@ -38,7 +38,13 @@ if (typeof Promise.withResolvers !== 'function') {
   };
 }
 
-const MAX_TOTAL_CHARS = 6_000_000; // safety cap per book (fits full reference textbooks)
+// Full reference textbooks can exceed six million characters. Keep ingestion
+// bounded, while allowing hosts to choose a smaller limit for available memory.
+const DEFAULT_MAX_EXTRACTED_TEXT_CHARS = 24_000_000;
+const configuredTextLimit = Number(process.env.MAX_EXTRACTED_TEXT_CHARS ?? DEFAULT_MAX_EXTRACTED_TEXT_CHARS);
+export const MAX_EXTRACTED_TEXT_CHARS = Number.isSafeInteger(configuredTextLimit)
+  && configuredTextLimit > 0 && configuredTextLimit <= 64 * 1024 * 1024
+  ? configuredTextLimit : DEFAULT_MAX_EXTRACTED_TEXT_CHARS;
 const MIN_TEXT_LENGTH = 100;
 const MAX_CHAPTERS = 120;
 const FALLBACK_CHARS_PER_PART = 9000;
@@ -570,8 +576,8 @@ async function insertChapters(bookId, chapters, execute = query) {
 async function finalizeBook(bookId, lines, outline, fileHash = null) {
   const usable = lines;
   const totalChars = usable.reduce((sum, line) => sum + line.text.length + 1, 0);
-  if (totalChars > MAX_TOTAL_CHARS) {
-    throw new IngestError('This book exceeds the extracted-text limit. Split it into smaller volumes and upload each volume.');
+  if (totalChars > MAX_EXTRACTED_TEXT_CHARS) {
+    throw new IngestError(`This book exceeds the extracted-text limit of ${MAX_EXTRACTED_TEXT_CHARS.toLocaleString('en-US')} characters. Split it into smaller volumes and upload each volume.`);
   }
 
   const chapters = splitIntoChapters(usable, outline);

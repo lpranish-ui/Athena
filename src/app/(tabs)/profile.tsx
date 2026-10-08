@@ -2,7 +2,7 @@
 // subject and weak chapters, and account deletion.
 
 import { Ionicons } from '@expo/vector-icons';
-import { useFocusEffect } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
@@ -375,6 +375,9 @@ export default function ProfileScreen() {
           <Button label={saved ? 'Saved ✓' : 'Save profile'} onPress={save} loading={saving} />
         </Card>
 
+        <Button label="Study track & syllabus" variant="secondary" icon="school-outline" onPress={() => router.push('/study/preferences')} />
+        <Button label="Account security" variant="secondary" icon="shield-checkmark-outline" onPress={() => router.push('/account/security')} />
+        <Button label="Help & content reports" variant="secondary" icon="help-circle-outline" onPress={() => router.push('/help')} />
         <Button
           label="Sign out"
           variant="secondary"
@@ -394,7 +397,7 @@ export default function ProfileScreen() {
           </Text>
         </Pressable>
 
-        <Text style={styles.footer}>Athena v1.1 · quizzes generated with DeepSeek</Text>
+        <Text style={styles.footer}>Athena · your daily medical study plan</Text>
       </ScrollView>
     </Screen>
   );

@@ -80,6 +80,7 @@ export function recordAnswer(progress, questionId, correct, confidence, now, dat
 export function courseSummary(pack) {
   return { id: pack.id, title: pack.title, subject: pack.subject, description: pack.description,
     version: pack.version, review_status: pack.review_status, review_note: pack.review_note,
+    reviewed_by: pack.reviewed_by ?? null, reviewed_at: pack.reviewed_at ?? null,
     objective_count: pack.concepts.length,
     question_count: pack.concepts.reduce((sum, concept) => sum + concept.questions.length, 0) };
 }
@@ -92,7 +93,8 @@ export function courseDetail(pack, progressById = {}) {
   })) };
 }
 
-export function rankedConcepts(pack, progressById, now) {
+export function rankedConcepts(pack, progressById, now, syllabusConceptIds = []) {
+  const syllabus = new Set(syllabusConceptIds);
   return pack.concepts.map((concept, index) => {
     const progress = { ...emptyProgress(), ...progressById[concept.id] };
     const kind = progress.needs_repair ? 'repair'
@@ -103,15 +105,16 @@ export function rankedConcepts(pack, progressById, now) {
     return { concept, progress, kind, priority, index };
   }).sort((a, b) => a.priority - b.priority
     || (a.priority < 2 ? new Date(a.progress.due_at ?? 0) - new Date(b.progress.due_at ?? 0) : 0)
+    || (a.priority >= 2 ? Number(syllabus.has(b.concept.id)) - Number(syllabus.has(a.concept.id)) : 0)
     || a.index - b.index);
 }
 
 /** Build private snapshots; the API serializer deliberately strips answer keys. */
-export function planSession(pack, progressById, minutes, now, { examDate = null, today = null } = {}) {
+export function planSession(pack, progressById, minutes, now, { examDate = null, today = null, syllabusConceptIds = [] } = {}) {
   const steps = [];
   const usedQuestions = new Set();
   let spent = 0;
-  let ranked = rankedConcepts(pack, progressById, now);
+  let ranked = rankedConcepts(pack, progressById, now, syllabusConceptIds);
   if (examDate && today) {
     const daysRemaining = Math.max(1, Math.ceil((new Date(`${examDate}T00:00:00Z`)
       - new Date(`${today}T00:00:00Z`)) / 86_400_000));
@@ -176,6 +179,9 @@ export function serializeSession(row, answers = []) {
   const completedQuestions = row.steps.filter((step) => step.type === 'question' && answerByStep.has(step.id));
   return { id: row.id, course_id: row.course_id, course_title: row.course_title,
     pack_version: row.pack_version, local_date: String(row.local_date).slice(0, 10),
+    review_status: row.pack_snapshot?.review_status ?? 'draft',
+    review_note: row.pack_snapshot?.review_note ?? 'Original draft pack. Editorial review pending.',
+    reviewed_by: row.pack_snapshot?.reviewed_by ?? null, reviewed_at: row.pack_snapshot?.reviewed_at ?? null,
     daily_minutes: row.daily_minutes, status: row.status, steps,
     current_index: steps.findIndex((step) => !step.completed) === -1 ? steps.length : steps.findIndex((step) => !step.completed),
     estimated_minutes: steps.reduce((sum, step) => sum + step.estimated_minutes, 0),

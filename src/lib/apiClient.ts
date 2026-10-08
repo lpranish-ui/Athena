@@ -5,6 +5,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { fetchText } from './request';
+import { notifySessionInvalid } from './session-events';
 
 const rawBase = (process.env.EXPO_PUBLIC_API_URL ?? '').trim();
 export const API_URL = rawBase.replace(/\/+$/, '');
@@ -114,6 +115,7 @@ export async function apiRequest<T>(
   }
 
   if (!response.ok) {
+    if (response.status === 401 && token) notifySessionInvalid(token);
     const fromBody =
       typeof data === 'object' && data !== null && 'error' in data
         ? String((data as { error: unknown }).error)

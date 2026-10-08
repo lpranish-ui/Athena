@@ -1,95 +1,73 @@
-// Offline reading — downloads a book's chapters into device storage so the
-// reader keeps working without a connection. Web: localStorage (~5-10 MB),
-// native: AsyncStorage. Chapter content is stored per chapter to keep every
-// entry well under platform size limits.
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
+// Private downloads are account-scoped and invalidated immediately on logout.
 import type { Book, ChapterSummary } from '@/types';
-import { api } from './apiClient';
+import { api, loadToken } from './apiClient';
+import { privateOffline } from './privateOffline';
+import type { OfflineAccountLease } from './offlineStorage';
 
-const PREFIX = 'athena.offline.';
+export { clearPrivateOfflineData, setOfflineAccount } from './privateOffline';
+export { isOfflineNetworkError } from './offlineStorage';
+export const captureOfflineAccount = () => privateOffline.lease();
+export const assertOfflineAccount = (lease: OfflineAccountLease) => privateOffline.assertCurrent(lease);
 
-export interface OfflineChapterContent {
-  id: string;
-  title: string;
-  content: string;
-  number?: number;
-}
+export interface OfflineChapterContent { id: string; title: string; content: string; number?: number }
+export interface OfflineBookMeta { book: Book; chapters: ChapterSummary[]; savedAt: string; bytes: number }
+const bookPath = (bookId: string) => `books.${encodeURIComponent(bookId)}.`;
+const metaKey = (bookId: string) => `${bookPath(bookId)}meta`;
+const chapterKey = (bookId: string, chapterId: string) => `${bookPath(bookId)}ch.${encodeURIComponent(chapterId)}`;
 
-export interface OfflineBookMeta {
-  book: Book;
-  chapters: ChapterSummary[];
-  savedAt: string;
-  bytes: number;
-}
-
-const metaKey = (bookId: string) => `${PREFIX}${bookId}.meta`;
-const chapterKey = (bookId: string, chapterId: string) => `${PREFIX}${bookId}.ch.${chapterId}`;
-
-/** Human-readable byte size for download badges. */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1048576) return `${(bytes / 1048576).toFixed(1)} MB`;
   if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${bytes} B`;
 }
 
-/** Reads the offline summary for a book (null when not downloaded). */
-export async function getOfflineMeta(bookId: string): Promise<OfflineBookMeta | null> {
-  try {
-    const raw = await AsyncStorage.getItem(metaKey(bookId));
-    return raw ? (JSON.parse(raw) as OfflineBookMeta) : null;
-  } catch {
-    return null;
-  }
+export async function getOfflineMeta(bookId: string, lease = privateOffline.lease()): Promise<OfflineBookMeta | null> {
+  return privateOffline.read<OfflineBookMeta>(lease, metaKey(bookId));
 }
 
-/** Fetches every chapter and stores it locally; meta is written last so a
- *  partial download never reports itself as complete. */
-export async function downloadBook(
-  bookId: string,
-  onProgress?: (done: number, total: number) => void,
-): Promise<OfflineBookMeta> {
-  const book = await api.get<Book>(`/api/books/${bookId}`);
-  const chapters = await api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`);
+/** The manifest is written last, so interrupted downloads cannot be opened. */
+export async function downloadBook(bookId: string, onProgress?: (done: number, total: number) => void): Promise<OfflineBookMeta> {
+  const lease = privateOffline.lease();
+  const token = await loadToken();
+  privateOffline.assertCurrent(lease);
+  const book = await api.get<Book>(`/api/books/${bookId}`, token);
+  privateOffline.assertCurrent(lease);
+  const chapters = await api.get<ChapterSummary[]>(`/api/books/${bookId}/chapters`, token);
+  privateOffline.assertCurrent(lease);
+  await privateOffline.remove(lease, [metaKey(bookId)]);
   onProgress?.(0, chapters.length);
   let bytes = 0;
   let done = 0;
   for (const chapter of chapters) {
-    const data = await api.get<OfflineChapterContent>(`/api/chapters/${chapter.id}`);
-    await AsyncStorage.setItem(
-      chapterKey(bookId, chapter.id),
-      JSON.stringify({
-        id: data.id,
-        title: data.title,
-        content: data.content,
-        number: data.number,
-      } satisfies OfflineChapterContent),
-    );
-    bytes += data.content.length;
+    const data = await api.get<OfflineChapterContent>(`/api/chapters/${chapter.id}`, token);
+    await privateOffline.write(lease, chapterKey(bookId, chapter.id), {
+      id: data.id, title: data.title, content: data.content, number: data.number,
+    } satisfies OfflineChapterContent);
+    for (const character of data.content) {
+      const code = character.codePointAt(0)!;
+      bytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4;
+    }
     done += 1;
     onProgress?.(done, chapters.length);
   }
   const meta: OfflineBookMeta = { book, chapters, savedAt: new Date().toISOString(), bytes };
-  await AsyncStorage.setItem(metaKey(bookId), JSON.stringify(meta));
+  await privateOffline.write(lease, metaKey(bookId), meta);
   return meta;
 }
 
-/** Removes the offline copy (chapters + meta). */
-export async function deleteOfflineBook(bookId: string): Promise<void> {
-  const meta = await getOfflineMeta(bookId);
-  const keys = [metaKey(bookId), ...(meta?.chapters ?? []).map((chapter) => chapterKey(bookId, chapter.id))];
-  await AsyncStorage.multiRemove(keys);
+/** Removes partial downloads as well as manifest-listed chapters. */
+export async function deleteOfflineBook(bookId: string, lease = privateOffline.lease()): Promise<void> {
+  await privateOffline.remove(lease, await privateOffline.list(lease, bookPath(bookId)));
 }
 
-/** Reads a stored chapter (null when missing or unreadable). */
-export async function readOfflineChapter(
-  bookId: string,
-  chapterId: string,
-): Promise<OfflineChapterContent | null> {
-  try {
-    const raw = await AsyncStorage.getItem(chapterKey(bookId, chapterId));
-    return raw ? (JSON.parse(raw) as OfflineChapterContent) : null;
-  } catch {
-    return null;
-  }
+export async function listOfflineBooks(lease = privateOffline.lease()): Promise<OfflineBookMeta[]> {
+  const paths = (await privateOffline.list(lease, 'books.')).filter((path) => path.endsWith('.meta'));
+  const metas = await Promise.all(paths.map((path) => privateOffline.read<OfflineBookMeta>(lease, path)));
+  return metas.filter((meta): meta is OfflineBookMeta => !!meta);
+}
+
+export async function readOfflineChapter(bookId: string, chapterId: string, lease = privateOffline.lease()): Promise<OfflineChapterContent | null> {
+  const meta = await getOfflineMeta(bookId, lease);
+  if (!meta?.chapters.some((chapter) => chapter.id === chapterId)) return null;
+  return privateOffline.read<OfflineChapterContent>(lease, chapterKey(bookId, chapterId));
 }

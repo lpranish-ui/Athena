@@ -12,6 +12,8 @@ export interface CourseSummary {
   version: string;
   review_status: 'draft' | 'reviewed';
   review_note: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
   objective_count: number;
   question_count: number;
 }
@@ -101,6 +103,10 @@ export interface StudySession {
   course_id: string;
   course_title: string;
   pack_version: string;
+  review_status?: 'draft' | 'reviewed';
+  review_note?: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
   local_date: string;
   daily_minutes: number;
   status: 'active' | 'completed';

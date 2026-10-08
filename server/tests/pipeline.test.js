@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { extractEpubText, extractPdf, ingestText, splitIntoChapters } from '../src/ingest.js';
+import { extractEpubText, extractPdf, ingestText, MAX_EXTRACTED_TEXT_CHARS, splitIntoChapters } from '../src/ingest.js';
 import { strToU8, zipSync } from 'fflate';
 import { pool } from '../src/db.js';
 import { contextWithPageMarkers, excerptContext, sampleChapterContext } from '../src/context.js';
@@ -51,7 +51,7 @@ test('short front sections remain readable when later chapters validate the spli
   assert.ok(chapters[0].content.includes('Brief source introduction.'));
 });
 
-test('a fresh pasted book creates chapters in a transaction instead of taking the ready replay path', async (t) => {
+function mockIngestDatabase(t) {
   const originalQuery = pool.query;
   const originalConnect = pool.connect;
   t.after(() => { pool.query = originalQuery; pool.connect = originalConnect; });
@@ -81,13 +81,49 @@ test('a fresh pasted book creates chapters in a transaction instead of taking th
       return { rows: [] };
     },
   });
+  return { get book() { return book; }, get chapters() { return chapters; }, events };
+}
+
+test('a fresh pasted book creates chapters in a transaction instead of taking the ready replay path', async (t) => {
+  const fixture = mockIngestDatabase(t);
   const result = await ingestText({ userId: 'student', title: 'Biology', subject: 'General', text: quote.repeat(5) });
   assert.equal(result.chapters, 1);
-  assert.equal(chapters.length, 1);
-  assert.equal(book.status, 'ready');
-  assert.ok(chapters[0].content.includes(quote));
-  assert.ok(events.includes('begin') && events.includes('commit'));
-  assert.equal(events.at(-1), 'release');
+  assert.equal(fixture.chapters.length, 1);
+  assert.equal(fixture.book.status, 'ready');
+  assert.ok(fixture.chapters[0].content.includes(quote));
+  assert.ok(fixture.events.includes('begin') && fixture.events.includes('commit'));
+  assert.equal(fixture.events.at(-1), 'release');
+});
+
+test('reference textbooks above six million characters retain the complete source text', async (t) => {
+  const fixture = mockIngestDatabase(t);
+  const text = 'First source page.\n' + ('Reference section source. '.repeat(40).trimEnd() + '\n').repeat(6000)
+    + 'Final source page retained.';
+  assert.ok(text.length > 6_000_000 && text.length < MAX_EXTRACTED_TEXT_CHARS);
+  const result = await ingestText({ userId: 'student', title: 'Large reference book', text });
+  assert.ok(result.chapters > 1 && result.chapters <= 120);
+  assert.equal(fixture.book.status, 'ready');
+  assert.ok(fixture.chapters.map((chapter) => chapter.content).join('\n') === text,
+    'All source text, including the final page, must survive ingestion.');
+});
+
+test('a configured extracted-text limit rejects the whole book before chapter writes', async (t) => {
+  const fixture = mockIngestDatabase(t);
+  const previous = process.env.MAX_EXTRACTED_TEXT_CHARS;
+  let configured;
+  try {
+    process.env.MAX_EXTRACTED_TEXT_CHARS = '200';
+    configured = await import('../src/ingest.js?configured-text-limit');
+  } finally {
+    if (previous === undefined) delete process.env.MAX_EXTRACTED_TEXT_CHARS;
+    else process.env.MAX_EXTRACTED_TEXT_CHARS = previous;
+  }
+  assert.equal(configured.MAX_EXTRACTED_TEXT_CHARS, 200);
+  await assert.rejects(configured.ingestText({ userId: 'student', title: 'Oversized source', text: quote.repeat(5) }),
+    /extracted-text limit of 200 characters/);
+  assert.equal(fixture.book, null);
+  assert.deepEqual(fixture.chapters, []);
+  assert.deepEqual(fixture.events, []);
 });
 
 function textPdf(text) {
