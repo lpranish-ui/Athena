@@ -67,6 +67,9 @@ backups must include durable upload chunks, not just book metadata.
 Alert on sustained HTTP failures, slow responses, old queued uploads, database
 storage growth and AI spending. `X-Request-Id` correlates slow/error request logs;
 logs intentionally exclude URL query strings, request bodies and account identity.
-Free API hosting can sleep and pauses its inline upload worker. An always-running
-API/worker, durable generation jobs, persistent/global AI budgets and aggregate
+Free API hosting can sleep and pauses its inline workers. Durable generation
+jobs queue in PostgreSQL: the worker leases one job at a time, heartbeats long
+runs, retries transient failures once and keeps finished jobs for a week; the
+app polls queued/running jobs and shows their stage. An always-running
+API/worker, persistent/global AI budgets and aggregate
 library quotas remain subsequent infrastructure work.

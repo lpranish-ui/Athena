@@ -8,11 +8,11 @@
 // ============================================================================
 
 import { chatJson, getVerifyModel, MissingKeyError } from './ai.js';
+import { contextWithPageMarkers, sampleChapterContext } from './context.js';
 import { one, query } from './db.js';
+import { groundedStudyMaterial, verifiedStudyFacts } from './grounding.js';
 import { HttpError } from './http.js';
 import { fixedChaptersSection } from './questions.js';
-import { contextWithPageMarkers, sampleChapterContext } from './context.js';
-import { groundedStudyMaterial, verifiedStudyFacts } from './grounding.js';
 
 const MIN_CARDS = 6;
 const MAX_CARDS = 24;
@@ -66,7 +66,7 @@ async function verifyFacts(items, context, userId) {
  * Generates (or regenerates) study material for one chapter.
  * Returns { kind, content }.
  */
-export async function generateStudyKit({ userId, chapterId, kind, count }) {
+export async function generateStudyKit({ userId, chapterId, kind, count, onStage }) {
   try {
     const cleanKind = kind === 'summary' ? 'summary' : kind === 'flashcards' ? 'flashcards' : null;
     if (!chapterId || !cleanKind) {
@@ -111,6 +111,7 @@ export async function generateStudyKit({ userId, chapterId, kind, count }) {
             'Return JSON: {"points":[{"heading":"...","detail":"...","supporting_quote":"..."}]}',
           ].join('\n');
 
+    await onStage?.('Drafting study material…');
     const raw = await chatJson({
       messages: [
         { role: 'system', content: SYSTEM_PROMPT },
@@ -148,11 +149,13 @@ export async function generateStudyKit({ userId, chapterId, kind, count }) {
     let content = groundedStudyMaterial(parsed, context, cleanKind, cardCount);
     const items = cleanKind === 'flashcards' ? content.cards : content.points;
     if (items.length < 3) throw new HttpError(502, 'The AI did not produce enough source-grounded study material. Please try again.');
+    await onStage?.('Checking the source…');
     const verified = await verifyFacts(items, context, userId);
     if (verified.length < 3) throw new HttpError(502, 'The source check could not verify enough study facts. Please try again.');
     content = cleanKind === 'flashcards' ? { cards: verified }
       : { overview: verified.slice(0, 3).map((point) => point.detail).join(' '), points: verified };
 
+    await onStage?.('Saving…');
     await query(
       `insert into study_materials (user_id, chapter_id, kind, content)
        values ($1, $2, $3, $4::jsonb)

@@ -21,6 +21,7 @@ export default function SummaryScreen() {
   const [chapterTitle, setChapterTitle] = useState('');
   const [loading, setLoading] = useState(true);
   const [regenerating, setRegenerating] = useState(false);
+  const [stage, setStage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -54,14 +55,16 @@ export default function SummaryScreen() {
   const regenerate = async () => {
     if (!chapterId) return;
     setRegenerating(true);
+    setStage(null);
     setError(null);
     try {
-      await generateStudyKit({ chapterId, kind: 'summary' });
+      await generateStudyKit({ chapterId, kind: 'summary', onStage: setStage });
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not create the summary.');
     } finally {
       setRegenerating(false);
+      setStage(null);
     }
   };
 
@@ -135,6 +138,7 @@ export default function SummaryScreen() {
           onPress={() => void regenerate()}
           loading={regenerating}
         />
+        {regenerating && stage ? <Text style={styles.footerHint}>{stage}</Text> : null}
         <Text style={styles.footerHint}>
           Summaries are written only from this chapter’s text; verify anything critical in the book
           itself.

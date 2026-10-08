@@ -14,6 +14,7 @@ import { registerPublicShareRoutes, registerShareRoutes } from './shares.js';
 import { generateStudyKit as defaultGenerateStudyKit } from './studykit.js';
 import { registerStudyRoutes } from './study.js';
 import { registerUploadRoutes } from './uploads.js';
+import { registerGenerationRoutes } from './jobs.js';
 import { requestMonitoring } from './observability.js';
 
 /** Construct routes without connecting to a database or opening a listening socket. */
@@ -68,6 +69,9 @@ export function createApp({ database = defaultDatabase, authenticate = createReq
     app.use('/api/ai', aiLimiter);
     app.use('/api/books/:id/ask', aiLimiter);
   }
+  // Registered after the limiter so new jobs count against the hourly budget
+  // (status polling is exempted by method inside the limiter).
+  registerGenerationRoutes(app, { database });
 
   /** Sends a thrown error with the right status and a `{ error }` body. */
   function handle(res, error, fallback) {

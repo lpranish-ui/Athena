@@ -94,13 +94,14 @@ export default function ChapterScreen() {
   const [questionType, setQuestionType] = useState<QuestionType>('single_best_answer');
   const [count, setCount] = useState(10);
   const [generating, setGenerating] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; stage: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [materials, setMaterials] = useState<{
     flashcards: StudyMaterial | null;
     summary: StudyMaterial | null;
   }>({ flashcards: null, summary: null });
   const [kitBusy, setKitBusy] = useState<'flashcards' | 'summary' | null>(null);
+  const [kitStage, setKitStage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -150,7 +151,14 @@ export default function ChapterScreen() {
         count,
         difficulty,
         questionType,
-        onProgress: (done, total) => setProgress({ done, total }),
+        onProgress: (done, total) =>
+          setProgress((previous) => ({ done, total, stage: previous?.stage ?? null })),
+        onStage: (stage) =>
+          setProgress((previous) => ({
+            done: previous?.done ?? 0,
+            total: previous?.total ?? count,
+            stage,
+          })),
       });
       router.push({ pathname: '/quiz/[id]', params: { id: setId } });
     } catch (err) {
@@ -164,9 +172,10 @@ export default function ChapterScreen() {
   const makeKit = async (kind: 'flashcards' | 'summary') => {
     if (!chapter) return;
     setKitBusy(kind);
+    setKitStage(null);
     setError(null);
     try {
-      await generateStudyKit({ chapterId: chapter.id, kind });
+      await generateStudyKit({ chapterId: chapter.id, kind, onStage: setKitStage });
       router.push(
         kind === 'flashcards'
           ? { pathname: '/flashcards', params: { chapterId: chapter.id } }
@@ -176,6 +185,7 @@ export default function ChapterScreen() {
       setError(err instanceof Error ? err.message : 'Could not create the study material.');
     } finally {
       setKitBusy(null);
+      setKitStage(null);
     }
   };
 
@@ -263,7 +273,8 @@ export default function ChapterScreen() {
           />
           {generating && progress ? (
             <Text style={styles.progressText}>
-              Generated {progress.done} of {progress.total} questions…
+              {progress.done > 0 ? `Generated ${progress.done} of ${progress.total} · ` : ''}
+              {progress.stage ?? 'Generating…'}
             </Text>
           ) : null}
           <Text style={styles.hint}>
@@ -306,6 +317,9 @@ export default function ChapterScreen() {
               style={styles.kitButton}
             />
           </View>
+          {kitBusy && kitStage ? (
+            <Text style={styles.progressText}>{kitStage}</Text>
+          ) : null}
           <Text style={styles.hint}>
             Flashcards are exportable to Anki; the summary is a one-page high-yield recap with page
             references.

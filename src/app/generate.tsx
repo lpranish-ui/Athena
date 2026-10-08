@@ -77,7 +77,7 @@ export default function GenerateScreen() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number; stage: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [questionType, setQuestionType] = useState<QuestionType>('single_best_answer');
@@ -151,7 +151,14 @@ export default function GenerateScreen() {
         count,
         difficulty,
         questionType,
-        onProgress: (done, total) => setProgress({ done, total }),
+        onProgress: (done, total) =>
+          setProgress((previous) => ({ done, total, stage: previous?.stage ?? null })),
+        onStage: (stage) =>
+          setProgress((previous) => ({
+            done: previous?.done ?? 0,
+            total: previous?.total ?? count,
+            stage,
+          })),
       });
       router.push({ pathname: '/quiz/[id]', params: { id: setId } });
     } catch (err) {
@@ -258,7 +265,8 @@ export default function GenerateScreen() {
         />
         {generating && progress ? (
           <Text style={styles.progressText}>
-            Generated {progress.done} of {progress.total} questions…
+            {progress.done > 0 ? `Generated ${progress.done} of ${progress.total} · ` : ''}
+            {progress.stage ?? 'Generating…'}
           </Text>
         ) : null}
         <Text style={styles.hint}>

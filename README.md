@@ -193,8 +193,8 @@ signing. For the existing EAS preview profile, use
 `npx eas-cli@latest build --platform android --profile preview`
 ([EAS setup](https://docs.expo.dev/build/setup/)).
 
-Future work includes broader reviewed course packs, an admin question-review
-dashboard and durable AI-generation jobs. Offline book reading and downloaded
+Future work includes broader reviewed course packs and an admin question-review
+dashboard. Offline book reading and downloaded
 daily sessions with synchronization are available. Replace the Expo placeholder icons before release.
 Ship original or appropriately licensed default content, and keep provider/JWT
 secrets in the server environment.
@@ -255,6 +255,13 @@ sender), and `AUTH_PUBLIC_URL` (the public web app URL) in the API environment
 to enable account emails. Missing configuration returns an explicit unavailable
 message; no reset token is returned through the API or printed in logs. Existing
 accounts remain usable; verification is visible and is not yet a sign-in gate.
+
+Quiz sets and study material are generated through a durable queue. Jobs keep
+running when the app closes or the network drops, report their stage
+("Drafting questions…", "Checking every answer…"), and store results
+server-side; the Quizzes tab lists anything still running and refreshes when it
+finishes. Transient interruptions retry once, while content-validation errors
+surface immediately. A user can have three jobs queued or running at a time.
 
 Course objectives and graded daily questions offer **Report an issue**. Reports
 are versioned and private to the reporter, with open/triaged/resolved status in

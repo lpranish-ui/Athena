@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
     ActivityIndicator,
     FlatList,
@@ -12,6 +12,7 @@ import {
 
 import { Screen } from '@/components/Screen';
 import { Badge, EmptyState, ErrorBanner } from '@/components/ui';
+import { listActiveGenerationJobs, type GenerationJob } from '@/lib/api';
 import { api } from '@/lib/apiClient';
 import { formatRelative, percentage } from '@/lib/format';
 import { colors, fontSize, spacing, withAlpha } from '@/theme';
@@ -29,6 +30,7 @@ export default function QuizzesScreen() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dueCount, setDueCount] = useState(0);
+  const [activeJobs, setActiveJobs] = useState<GenerationJob[]>([]);
   const [planner, setPlanner] = useState<{
     examLabel: string;
     daysLeft: number;
@@ -52,6 +54,7 @@ export default function QuizzesScreen() {
       setError(null);
       setSets(setsData);
       setDueCount(plannerData.dueCount);
+      setActiveJobs(await listActiveGenerationJobs());
 
       if (plannerData.examDate) {
         const daysLeft = Math.ceil(
@@ -82,6 +85,23 @@ export default function QuizzesScreen() {
       void load();
     }, [load]),
   );
+
+  // While material is generating, poll so the list freshens the moment it is ready.
+  useEffect(() => {
+    if (activeJobs.length === 0) return;
+    const timer = setInterval(() => {
+      void (async () => {
+        const jobs = await listActiveGenerationJobs();
+        if (jobs.length === 0) {
+          setActiveJobs([]);
+          await load();
+        } else {
+          setActiveJobs(jobs);
+        }
+      })();
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [activeJobs.length, load]);
 
   return (
     <Screen padded={false}>
@@ -130,6 +150,22 @@ export default function QuizzesScreen() {
                 </View>
                 <Ionicons name="chevron-forward" size={18} color={colors.textMuted} />
               </Pressable>
+            ) : null}
+            {activeJobs.length > 0 ? (
+              <View style={[styles.reviewCard, styles.planCard]}>
+                <Ionicons name="sparkles-outline" size={20} color={colors.primary} />
+                <View style={styles.reviewText}>
+                  <Text style={styles.reviewTitle}>
+                    {activeJobs.length === 1
+                      ? 'Generating in the background'
+                      : `Generating ${activeJobs.length} items in the background`}
+                  </Text>
+                  <Text style={styles.reviewMeta}>
+                    {activeJobs[0].stage} — keeps running even if you close the app.
+                  </Text>
+                </View>
+                <ActivityIndicator color={colors.primary} size="small" />
+              </View>
             ) : null}
             <Pressable
               style={({ pressed }) => [styles.reviewCard, pressed && styles.pressed]}

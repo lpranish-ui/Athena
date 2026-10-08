@@ -2,7 +2,7 @@
 // (Replaces the old Supabase edge-function invoke helpers.)
 
 import type { Difficulty, FlagReason, QuestionType, StudyContent } from '@/types';
-import { api, ApiError } from './apiClient';
+import { api, apiRequest, ApiError } from './apiClient';
 
 /** Pulls a friendly message out of an API error. */
 function toUserMessage(error: unknown, fallback: string): string {
@@ -23,38 +23,98 @@ interface GenerateResult {
   count: number;
 }
 
-async function generateChunk(
-  input: GenerateInput & { addToSetId?: string },
-): Promise<GenerateResult> {
+/** Server state for one durable generation job. */
+export interface GenerationJob {
+  id: string;
+  kind: 'mcqs' | 'study_kit';
+  status: 'queued' | 'running' | 'done' | 'failed';
+  stage: string;
+  error: string | null;
+  result: unknown;
+  createdAt: string;
+  updatedAt: string;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Queues a durable generation job (the worker keeps running if the app closes). */
+async function enqueueGeneration(body: Record<string, unknown>): Promise<{ jobId: string }> {
   try {
-    return await api.post<GenerateResult>('/api/ai/generate-mcqs', input);
+    return await api.post<{ jobId: string }>('/api/ai/jobs', body);
   } catch (error) {
-    throw new Error(toUserMessage(error, 'Quiz generation failed. Please try again.'));
+    throw new Error(toUserMessage(error, 'Could not start the generation. Please try again.'));
+  }
+}
+
+/**
+ * Polls one job until it finishes. Network blips are tolerated because the
+ * job keeps running server-side; the timeout message points the student at
+ * the background results instead of failing hard.
+ */
+async function waitForJob(
+  jobId: string,
+  { onStage }: { onStage?: (stage: string) => void } = {},
+): Promise<GenerationJob> {
+  const deadline = Date.now() + 15 * 60 * 1000;
+  let delay = 1500;
+  for (;;) {
+    let job: GenerationJob;
+    try {
+      job = await apiRequest<GenerationJob>('GET', `/api/ai/jobs/${jobId}`, { timeoutMs: 20000 });
+    } catch (error) {
+      const offline = error instanceof ApiError && error.status === 0;
+      if (!offline || Date.now() > deadline) {
+        throw new Error(toUserMessage(error, 'Could not check the generation status.'));
+      }
+      await sleep(delay);
+      delay = Math.min(5000, delay + 500);
+      continue;
+    }
+
+    onStage?.(job.stage);
+    if (job.status === 'done') return job;
+    if (job.status === 'failed') throw new Error(job.error ?? 'Generation failed. Please try again.');
+    if (Date.now() > deadline) {
+      throw new Error(
+        'This is taking longer than expected. It will finish in the background — check your quizzes shortly.',
+      );
+    }
+    await sleep(delay);
+    delay = Math.min(5000, delay + 500);
   }
 }
 
 const GENERATION_CHUNK = 20;
 
 /**
- * Generates a quiz of any supported size (10 / 20 / 50). Large sets are built
- * in chunks of 20 questions — each chunk is one AI call — and appended to the
- * same quiz.
+ * Generates a quiz of any supported size (10 / 20 / 50) through durable
+ * server-side jobs. Large sets are built in chunks of 20 questions — each
+ * chunk is one job — and appended to the same quiz.
  */
 export async function generateQuiz(
-  input: GenerateInput & { onProgress?: (done: number, total: number) => void },
+  input: GenerateInput & {
+    onProgress?: (done: number, total: number) => void;
+    onStage?: (stage: string) => void;
+  },
 ): Promise<{ setId: string; count: number }> {
-  const { onProgress, ...base } = input;
+  const { onProgress, onStage, ...base } = input;
 
   let setId: string | null = null;
   let generated = 0;
 
   while (generated < base.count) {
     const chunk = Math.min(GENERATION_CHUNK, base.count - generated);
-    const result = await generateChunk({
+    const { jobId } = await enqueueGeneration({
+      kind: 'mcqs',
       ...base,
       count: chunk,
       ...(setId ? { addToSetId: setId } : {}),
     });
+    const job = await waitForJob(jobId, { onStage });
+    const result = job.result as GenerateResult | null;
+    if (!result?.setId) throw new Error('Generation finished without a quiz. Please try again.');
 
     setId = result.setId;
     generated += result.count;
@@ -78,20 +138,37 @@ export async function replaceQuestion(questionId: string): Promise<{ mcqId: stri
   }
 }
 
-/** Generates a chapter summary or a flashcard deck (stored and reused). */
+/**
+ * Generates a chapter summary or a flashcard deck through a durable job
+ * (stored and reused). Finishes server-side even if the app closes.
+ */
 export async function generateStudyKit(input: {
   chapterId: string;
   kind: 'flashcards' | 'summary';
   count?: number;
+  onStage?: (stage: string) => void;
 }): Promise<StudyContent> {
+  const { jobId } = await enqueueGeneration({
+    kind: 'study_kit',
+    chapterId: input.chapterId,
+    material: input.kind,
+    ...(input.count != null ? { count: input.count } : {}),
+  });
+  const job = await waitForJob(jobId, { onStage: input.onStage });
+  const result = job.result as { kind: string; content: StudyContent } | null;
+  if (!result?.content) throw new Error('Could not create the study material. Please try again.');
+  return result.content;
+}
+
+/** Jobs still queued or running — lets screens show recovery state. */
+export async function listActiveGenerationJobs(): Promise<GenerationJob[]> {
   try {
-    const result = await api.post<{ kind: string; content: StudyContent }>(
-      '/api/ai/study-kit',
-      input,
-    );
-    return result.content;
-  } catch (error) {
-    throw new Error(toUserMessage(error, 'Could not create the study material.'));
+    const response = await apiRequest<{ jobs: GenerationJob[] }>('GET', '/api/ai/jobs?active=1', {
+      timeoutMs: 20000,
+    });
+    return response.jobs;
+  } catch {
+    return [];
   }
 }
 

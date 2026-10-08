@@ -7,6 +7,8 @@ export function createAiLimiter({
 } = {}) {
   const users = new Map();
   return (req, res, next) => {
+    // Polling durable generation jobs must not consume the hourly budget.
+    if (req.method === 'GET') return next();
     const userId = req.user?.id;
     if (!userId) return next();
     const time = now();

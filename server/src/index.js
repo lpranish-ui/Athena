@@ -3,6 +3,7 @@ import { createApp } from './app.js';
 import { assertAuthConfigured } from './auth.js';
 import { pool, query } from './db.js';
 import { createUploadWorker } from './uploads.js';
+import { createGenerationWorker } from './jobs.js';
 
 assertAuthConfigured();
 const app = createApp();
@@ -54,6 +55,8 @@ try {
 const port = Number(process.env.PORT) || 8787;
 const worker = createUploadWorker();
 worker.start();
+const generationWorker = createGenerationWorker();
+generationWorker.start();
 const server = app.listen(port, '0.0.0.0', () => {
   console.log(`Athena API listening on http://0.0.0.0:${port}`);
 });
@@ -61,6 +64,7 @@ const server = app.listen(port, '0.0.0.0', () => {
 async function shutdown() {
   server.close();
   await worker.stop();
+  await generationWorker.stop();
   await pool.end();
 }
 process.once('SIGTERM', shutdown);

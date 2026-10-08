@@ -156,7 +156,7 @@ async function verifyAnswers(questions, contexts, userId) {
  * `addToSetId` appends to an existing quiz (large sets are built in chunks).
  * Returns { setId, count, total }.
  */
-export async function generateMcqs({ userId, body }) {
+export async function generateMcqs({ userId, body, onStage }) {
   try {
     let ids = (
       Array.isArray(body.chapterIds) && body.chapterIds.length > 0
@@ -298,6 +298,7 @@ export async function generateMcqs({ userId, body }) {
     // 24000 max tokens leaves ~3x headroom for the model's internal reasoning
     // (~6-12k tokens on chapter-sized prompts) before the question JSON — when
     // reasoning exhausted a smaller budget, the content came back EMPTY.
+    await onStage?.('Drafting questions…');
     let questions = draftQuestions(
       await chatJson({ messages, maxTokens: 24000, temperature: 0.5, meta: { userId, purpose: 'generate_mcqs' } }),
     );
@@ -307,6 +308,7 @@ export async function generateMcqs({ userId, body }) {
     // it, so retry before giving up on the student.
     if (questions.length === 0) {
       console.log('generate_mcqs: first draft had no valid questions - retrying once');
+      await onStage?.('Retrying the draft…');
       questions = draftQuestions(
         await chatJson({ messages, maxTokens: 24000, temperature: 0.6, meta: { userId, purpose: 'generate_mcqs_retry' } }),
       );
@@ -320,6 +322,7 @@ export async function generateMcqs({ userId, body }) {
     }
 
     // ---- blind verification (a second, independent answer check) ------------
+    await onStage?.('Checking every answer…');
     const verified = await verifyAnswers(questions, contexts, userId);
     if (verified.length === 0) {
       throw new HttpError(502, 'The blind answer check could not verify these questions. Please try again.');
@@ -327,6 +330,7 @@ export async function generateMcqs({ userId, body }) {
     questions = verified;
 
     // ---- store --------------------------------------------------------------
+    await onStage?.('Saving…');
     return await withTransaction(async (client) => {
       const oneTx = async (sql, params) => (await client.query(sql, params)).rows[0] ?? null;
       if (targetSetId) {
