@@ -248,6 +248,8 @@ create table if not exists ai_calls (
 );
 
 create index if not exists ai_calls_created_idx on ai_calls (created_at desc);
+-- Serves the per-user sliding-window count in the AI budget check.
+create index if not exists ai_calls_user_window_idx on ai_calls (user_id, created_at desc);
 
 -- ----------------------------------------------------------------------------
 -- group study: live multiplayer quiz rooms (same questions, fastest + best wins)

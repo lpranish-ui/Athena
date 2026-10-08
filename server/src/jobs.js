@@ -173,6 +173,10 @@ export function createGenerationWorker({
         [JOB_RETENTION_DAYS],
       )
       .catch(() => {});
+    // Keep the provider-call log bounded; AI budgets only need the recent window.
+    await database
+      .query(`delete from ai_calls where created_at < now() - interval '90 days'`)
+      .catch(() => {});
   }
 
   async function runOnce() {

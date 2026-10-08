@@ -262,6 +262,10 @@ running when the app closes or the network drops, report their stage
 server-side; the Quizzes tab lists anything still running and refreshes when it
 finishes. Transient interruptions retry once, while content-validation errors
 surface immediately. A user can have three jobs queued or running at a time.
+AI usage is budgeted from the provider-call log: 200 calls per user per sliding
+hour and 400 calls per hour across all accounts by default
+(`AI_REQUESTS_PER_HOUR`, `AI_GLOBAL_REQUESTS_PER_HOUR`); the budgets persist
+across restarts and cover background jobs.
 
 Course objectives and graded daily questions offer **Report an issue**. Reports
 are versioned and private to the reporter, with open/triaged/resolved status in

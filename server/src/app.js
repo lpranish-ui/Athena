@@ -20,7 +20,7 @@ import { registerAdminRoutes } from './admin.js';
 
 /** Construct routes without connecting to a database or opening a listening socket. */
 export function createApp({ database = defaultDatabase, authenticate = createRequireAuth(database),
-  registerAuthentication = registerAuthRoutes, services = {}, aiLimiter = createAiLimiter() } = {}) {
+  registerAuthentication = registerAuthRoutes, services = {}, aiLimiter = createAiLimiter({ database }) } = {}) {
   const { query, one, many, withTransaction } = database;
   const app = express();
   const chapterService = createChapterService(database);

@@ -77,6 +77,14 @@ logs intentionally exclude URL query strings, request bodies and account identit
 Free API hosting can sleep and pauses its inline workers. Durable generation
 jobs queue in PostgreSQL: the worker leases one job at a time, heartbeats long
 runs, retries transient failures once and keeps finished jobs for a week; the
-app polls queued/running jobs and shows their stage. An always-running
-API/worker, persistent/global AI budgets and aggregate
-library quotas remain subsequent infrastructure work.
+app polls queued/running jobs and shows their stage.
+
+AI budgets are persistent and shared: the limiter counts successful provider
+calls (the `ai_calls` log, pruned after 90 days) over a sliding hour, so they
+survive restarts and cover background job execution. `AI_REQUESTS_PER_HOUR`
+(default 200) bounds one account; `AI_GLOBAL_REQUESTS_PER_HOUR` (default 400)
+bounds all accounts together and is the main backstop against abuse through
+fresh accounts. `AI_CONCURRENT_PER_USER` (default 2) limits in-flight work per
+account. A budget read that fails lets the request through deliberately. An
+always-running API/worker and aggregate library quotas remain subsequent
+infrastructure work.
